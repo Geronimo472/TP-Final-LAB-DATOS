@@ -1,0 +1,25 @@
+{
+    "proyecto": "Modelo Predictivo de Refrigeración - Planta Cerveza Tecate",
+    "fecha_generacion": "2026-10-19 16:56:24",
+    "script_origen": "pipeline_preprocesamiento.ipynb",
+    "transformaciones_aplicadas": [
+        "Agregación temporal de datos a nivel diario (cierre 23:59)",
+        "Tratamiento de nulos e infinitos",
+        "Creación de variable objetivo con shift(-1) (Target_Frio_Dia_Siguiente)",
+        "Extracción de variables de calendario (Anio, Mes, Dia_Semana, Es_Fin_De_Semana)",
+        "Creación de indicadores de eficiencia energética (Real vs Meta)",
+        "Cálculo de ratios e interacciones específicas de frío y producción",
+        "Integración de temperatura ambiente (media, max, min) de Tecate vía API Open-Meteo",
+        "Correccion de outliers",
+        "Correccion de Asimetrias mediante Yeo-Jhonson",
+        "Estandarizacion de variables",
+        "Selección de características mediante Random Forest e importancia de variables",
+        "Selección de características mediante LASSO (L1)",
+        "Conjunto final de características definido por la unión (RF U LASSO)"
+    ],
+    "dimensiones_dataset_final": {
+        "filas": 960,
+        "columnas_totales": 470,
+        "features_seleccionadas": 217
+    }
+}
