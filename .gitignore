@@ -1,3 +1,5 @@
 cervecera_env/
 __pycache__/
 .ipynb_checkpoints/
+notebooks/Datos del tp/datos crudos/*
+!notebooks/Datos del tp/datos crudos/.gitkeep
