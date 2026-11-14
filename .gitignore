@@ -12,3 +12,5 @@ __pycache__/
 
 # Archivos originales de datos
 *.xlsx
+# Exportación inicial generada por el EDA
+/data/dataset_unificado_inicial.csv
