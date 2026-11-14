@@ -10,5 +10,6 @@ __pycache__/
 # Jupyter
 .ipynb_checkpoints/
 
-# Archivos originales de datos
-*.xlsx
+# Ignorar datos procesados generados por código
+data/processed/*.csv
+!data/processed/.gitkeep
