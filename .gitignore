@@ -10,7 +10,19 @@ __pycache__/
 # Jupyter
 .ipynb_checkpoints/
 
-# Archivos originales de datos
-*.xlsx
-# Exportación inicial generada por el EDA
+# Archivos intermedios y copias locales generadas por los notebooks
 /data/dataset_unificado_inicial.csv
+/notebooks/data/
+/notebooks/datos crudos/
+
+# Ignorar datos procesados generados por código
+data/processed/*.csv
+!data/processed/.gitkeep
+
+# Resultados detallados de cada trial de Optuna (se regeneran al optimizar)
+/results/optuna_trials_*.csv
+
+# Modelos binarios entrenados; best_params.json sí se versiona
+/models/*.joblib
+/models/*.pkl
+/models/*.pickle

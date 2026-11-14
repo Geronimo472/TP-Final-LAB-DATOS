@@ -1,0 +1,14 @@
+{
+  "fecha_utc": "2026-11-14T20:25:57.024640+00:00",
+  "dataset": "data\\processed\\dataset_final.csv",
+  "dataset_sha256": "dd986007e5e1f64b36f351bbb1669bd89385c4760324ab1dbfe624bb98442603",
+  "modelos_ejecutados": [
+    "XGBoost",
+    "Random Forest",
+    "LightGBM",
+    "Ridge"
+  ],
+  "n_trials_por_modelo": 20,
+  "semilla": 42,
+  "metrica_optimizacion": "MAE_validacion"
+}
