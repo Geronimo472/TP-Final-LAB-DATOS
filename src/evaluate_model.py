@@ -27,6 +27,50 @@ def calcular_metricas(y_real, predicciones):
     }
 
 
+def imprimir_diagnostico_errores(y_val, residuos, errores_absolutos):
+    """Muestra las fechas difíciles y cuánto aportan los mayores errores al MAE."""
+    cantidad = min(10, len(y_val))
+    mediana = errores_absolutos.median(axis=1)
+    fechas = mediana.nlargest(cantidad).index
+    peores_fechas = residuos.loc[fechas].copy()
+    peores_fechas.insert(0, "Frío real", y_val.loc[fechas])
+    peores_fechas["Mediana |error|"] = mediana.loc[fechas]
+    peores_fechas.index = (fechas + pd.DateOffset(days=1)).strftime("%Y-%m-%d")
+    peores_fechas.index.name = "Día predicho"
+
+    print(f"\n{cantidad} fechas de mayor error compartido en VALIDACIÓN")
+    print("Ordenadas por la mediana del error absoluto de los modelos.")
+    print("Error = real - predicción. Un valor positivo indica que el modelo predijo de menos.")
+    print(peores_fechas.to_string(float_format="{:.2f}".format))
+
+    suma_peores = errores_absolutos.apply(lambda errores: errores.nlargest(cantidad).sum())
+    suma_total = errores_absolutos.sum()
+    concentracion = pd.DataFrame({
+        "MAE": errores_absolutos.mean(),
+        "% del error total": suma_peores.div(suma_total.where(suma_total.ne(0))).mul(100),
+        "Aporte al MAE": suma_peores.div(len(y_val)),
+    })
+    print(f"\nPeso de los {cantidad} peores días de cada modelo ({cantidad} de {len(y_val)} fechas)")
+    print(concentracion.to_string(float_format="{:.2f}".format, na_rep="—"))
+
+
+def baselines_validacion(y_train, y_val):
+    """Evalúa baselines con las observaciones disponibles antes de cada fecha."""
+    historia = pd.concat([y_train, y_val]).sort_index()
+    # Si el índice es D, el valor de y corresponde a D+1.
+    # Las dos predicciones excluyen el valor de y de la fila evaluada.
+    predicciones = {
+        "Persistencia": historia.ffill().shift(1),
+        "Media móvil 7 días": historia.rolling("7D", closed="left").mean(),
+    }
+    resultados = {}
+    for nombre, prediccion in predicciones.items():
+        disponible = prediccion.reindex(y_val.index).dropna()
+        metricas = calcular_metricas(y_val.loc[disponible.index], disponible) if len(disponible) else {}
+        resultados[nombre] = {**metricas, "Fechas": len(disponible)}
+    return pd.DataFrame.from_dict(resultados, orient="index")
+
+
 def comparar_baselines(modelos, y_historia_previa, X_evaluacion, y_evaluacion):
     """Compara métodos en las MISMAS fechas que tienen 7 días de historial.
 

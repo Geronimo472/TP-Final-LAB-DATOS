@@ -87,19 +87,17 @@ Esto garantiza que los notebooks utilicen las mismas dependencias que los script
 
 ## 6. Datos del proyecto
 
-Los archivos Excel originales no se incluyen en el repositorio.
-
-Deben obtenerse de los datos proporcionados por la cátedra y colocarse en:
+Los archivos Excel originales se gestionan mediante Git LFS. Después de clonar el repositorio, ejecutar `git lfs pull` para descargarlos en:
 
 ```text
-notebooks/
-└── datos crudos/
+data/
+└── raw/
     ├── Totalizadores Planta - 2021_2023.xlsx
     ├── Totalizadores Planta 2020_2022.xlsx
     └── Totalizadores Planta 2022_2023.xlsx
 ```
 
-Los nombres y las rutas deben coincidir con los que utiliza el notebook de preprocesamiento.
+El EDA prioriza esa carpeta. Para conservar compatibilidad con las ejecuciones anteriores, también acepta los mismos archivos en `notebooks/datos crudos`. Su paso 5.1 genera `data/dataset_unificado_inicial.csv`, que usa el notebook de preprocesamiento.
 
 Después del procesamiento se genera:
 
@@ -120,6 +118,7 @@ TP-Final-LAB-DATOS/
 │   ├── preprocesamiento.ipynb
 │   └── optuna_optimization.ipynb
 ├── src/
+│   ├── preprocessing_pipeline.py
 │   ├── train_model.py
 │   └── evaluate_model.py
 ├── models/
@@ -135,11 +134,16 @@ El flujo de trabajo se divide en las siguientes etapas.
 
 ### Etapa 1 — Preprocesamiento
 
-Ejecutar:
+1. Ejecutar `notebooks/eda.ipynb` hasta el paso 5.1 para exportar la tabla unificada.
+2. Desde la raíz del repositorio, ejecutar:
 
-`notebooks/preprocesamiento.ipynb`
+```powershell
+python src/preprocessing_pipeline.py
+```
 
-El notebook limpia los datos, genera características, realiza la división temporal de los conjuntos y exporta el dataset procesado.
+El notebook `notebooks/preprocesamiento.ipynb` documenta y permite inspeccionar los mismos criterios de preparación.
+
+El pipeline limpia los datos, genera características, realiza la división temporal de los conjuntos y exporta `data/processed/dataset_final.csv`. La ruta de entrada habitual es `data/dataset_unificado_inicial.csv`. Puede indicarse otra con `--data RUTA`.
 
 ### Etapa 2 — Optimización con Optuna
 
@@ -203,8 +207,9 @@ El proyecto utiliza:
 - Semilla aleatoria `42` en los procedimientos que admiten `random_state`.
 - Separación temporal Train (70 %), Validation (15 %) y Test (15 %).
 - Git para el control de versiones.
+- Git LFS para versionar los Excel originales sin incorporarlos directamente al historial normal de Git.
 
-Los datos originales se excluyen del repositorio y deben obtenerse por separado.
+Los datos originales quedan almacenados en Git LFS y se materializan en `data/raw` al ejecutar `git lfs pull`.
 
 ## 10. Estado del proyecto
 

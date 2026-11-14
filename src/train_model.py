@@ -7,7 +7,7 @@ El notebook importa de este módulo:
 Uso:
     python src/train_model.py                 # evaluar 4 modelos sobre Validation
     python src/train_model.py --finalizar     # reentrenar ganador Train+Val y guardarlo
-    python src/train_model.py --sin-graficos  # no mostrar los gráficos
+    python src/train_model.py --sin-graficos  # omite todos los gráficos
 
 No se usa Test aquí. Para la evaluación final usar evaluate_model.py --test.
 """
@@ -33,7 +33,12 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
 
-from evaluate_model import calcular_metricas, comparar_baselines, evaluar_mejor_modelo
+from evaluate_model import (
+    baselines_validacion,
+    calcular_metricas,
+    evaluar_mejor_modelo,
+    imprimir_diagnostico_errores,
+)
 
 RAIZ = Path(__file__).resolve().parent.parent
 TARGET = "Target_Frio_Dia_Siguiente"
@@ -289,18 +294,42 @@ def main():
     parser.add_argument("--finalizar", action="store_true",
                         help="Reentrena con Train+Val y guarda el ganador; sin tocar Test")
     parser.add_argument("--version", default="v1.0.0", help="Versión para --finalizar")
-    parser.add_argument("--sin-graficos", action="store_true")
+    parser.add_argument("--sin-graficos", action="store_true",
+                        help="Omite los gráficos")
     args = parser.parse_args()
 
     ruta_datos = resolver_ruta_csv(args.data)
-    X_train, y_train, X_val, y_val, _X_test, _y_test = cargar_datos_preprocesados(ruta_datos)
+    X_train, y_train, X_val, y_val, X_test, _y_test = cargar_datos_preprocesados(ruta_datos)
     parametros = cargar_mejores_parametros(args.params, ruta_datos)
     modelos, tabla = entrenar_modelos(X_train, y_train, X_val, y_val, parametros)
-    print("\nModelos en VALIDACIÓN (no Test):")
-    print(tabla)
-    comparar_baselines(modelos, y_train, X_val, y_val)
+    baselines = baselines_validacion(y_train, y_val)
+    tabla_completa = pd.concat([tabla.assign(Fechas=len(y_val)), baselines])
+    print("\nModelos y baselines en VALIDACIÓN")
+    print(tabla_completa.to_string(float_format="{:.2f}".format, na_rep="—"))
+    print("Persistencia usa la última observación disponible.")
+    print("La media móvil promedia las observaciones disponibles de los 7 días previos.")
+    print("Fechas indica cuántas predicciones se pudieron evaluar por método.")
     evaluar_mejor_modelo(modelos, tabla, X_val, y_val,
                          graficos=not args.sin_graficos)
+
+    residuos = pd.DataFrame({
+        nombre: y_val - modelos[nombre].predict(X_val)
+        for nombre in tabla.index
+    })
+    errores_por_fecha = residuos.abs()
+    mae_por_anio = errores_por_fecha.groupby(y_val.index.year.to_numpy()).mean().T
+    print("\nMAE de validación por año de la fecha de entrada")
+    print(mae_por_anio.to_string(float_format="{:.2f}".format))
+
+    filas_por_anio = pd.DataFrame({
+        "Train": X_train.index.year.value_counts(),
+        "Validation": X_val.index.year.value_counts(),
+        "Test": X_test.index.year.value_counts(),
+    }).fillna(0).astype(int).sort_index()
+    print("\nCantidad de filas por año")
+    print(filas_por_anio.rename_axis("Año").to_string())
+
+    imprimir_diagnostico_errores(y_val, residuos, errores_por_fecha)
 
     if args.finalizar:
         ganador = tabla.index[0]
