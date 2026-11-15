@@ -1,6 +1,6 @@
 {
     "proyecto": "Modelo Predictivo de Refrigeración - Planta Cerveza Tecate",
-    "fecha_generacion": "2026-11-14 21:41:36",
+    "fecha_generacion": "2026-11-15 15:19:23",
     "script_origen": "src/preprocessing_pipeline.py",
     "transformaciones_aplicadas": [
         "Filtrado de días incompletos (<25 registros), excedidos (>25) y sin reinicio (>100 kW a las 00:00)",
