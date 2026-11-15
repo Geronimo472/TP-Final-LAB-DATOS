@@ -8,7 +8,7 @@ No se usa el conjunto Test para elegir algoritmos ni hiperparámetros.
 """
 import argparse
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
@@ -54,68 +54,55 @@ def imprimir_diagnostico_errores(y_val, residuos, errores_absolutos):
     print(concentracion.to_string(float_format="{:.2f}".format, na_rep="—"))
 
 
-def baselines_validacion(y_train, y_val):
-    """Evalúa baselines con las observaciones disponibles antes de cada fecha."""
-    historia = pd.concat([y_train, y_val]).sort_index()
-    # Si el índice es D, el valor de y corresponde a D+1.
-    # Las dos predicciones excluyen el valor de y de la fila evaluada.
-    predicciones = {
-        "Persistencia": historia.ffill().shift(1),
-        "Media móvil 7 días": historia.rolling("7D", closed="left").mean(),
-    }
-    resultados = {}
-    for nombre, prediccion in predicciones.items():
-        disponible = prediccion.reindex(y_val.index).dropna()
-        metricas = calcular_metricas(y_val.loc[disponible.index], disponible) if len(disponible) else {}
-        resultados[nombre] = {**metricas, "Fechas": len(disponible)}
-    return pd.DataFrame.from_dict(resultados, orient="index")
-
-
-def comparar_baselines(modelos, y_historia_previa, X_evaluacion, y_evaluacion):
-    """Compara métodos en las MISMAS fechas que tienen 7 días de historial.
-
-    Los índices representan fecha D; y[D] = consumo de D+1.
-    Para predecir el consumo D+1: persistencia usa y[D-1] y
-    la media usa y[D-7:D-1]. Solo se comparan días consecutivos.
-    """
+def predecir_baselines(y_historia_previa, y_evaluacion):
+    """Predice con la última observación y la media de los datos disponibles en 7 días."""
     historia = pd.concat([y_historia_previa, y_evaluacion]).sort_index()
     if not isinstance(historia.index, pd.DatetimeIndex):
         raise ValueError("Se necesitan fechas para calcular los baselines.")
     if historia.index.has_duplicates:
         raise ValueError("Las fechas del histórico de baselines se repiten.")
 
-    pred_persistencia, pred_media = {}, {}
-    for fecha in X_evaluacion.index:
-        anteriores = pd.date_range(end=fecha - timedelta(days=1), periods=7, freq="D")
-        if all(dia in historia.index for dia in anteriores):
-            valores = historia.loc[anteriores].astype(float)
-            if valores.notna().all():
-                pred_persistencia[fecha] = float(valores.iloc[-1])
-                pred_media[fecha] = float(valores.mean())
+    # Si el índice es D, el valor de y corresponde a D+1.
+    # Las dos predicciones excluyen el valor de y de la fila evaluada.
+    predicciones = {
+        "Persistencia": historia.ffill().shift(1),
+        "Media móvil 7 días": historia.rolling("7D", closed="left", min_periods=1).mean(),
+    }
+    return pd.DataFrame(predicciones).reindex(y_evaluacion.index)
 
-    fechas_comunes = pd.DatetimeIndex(list(pred_persistencia))
+
+def baselines_validacion(y_train, y_val):
+    """Evalúa cada baseline en las fechas de Validation en que puede predecir."""
+    resultados = {}
+    for nombre, prediccion in predecir_baselines(y_train, y_val).items():
+        disponible = prediccion.dropna()
+        metricas = calcular_metricas(y_val.loc[disponible.index], disponible) if len(disponible) else {}
+        resultados[nombre] = {**metricas, "Fechas": len(disponible)}
+    return pd.DataFrame.from_dict(resultados, orient="index")
+
+
+def comparar_baselines(modelos, y_historia_previa, X_evaluacion, y_evaluacion):
+    """Compara el modelo y los baselines en las fechas con las tres predicciones."""
+    baselines = predecir_baselines(y_historia_previa, y_evaluacion).dropna()
+    fechas_comunes = X_evaluacion.index.intersection(baselines.index)
     if fechas_comunes.empty:
-        print("No hay fechas con 7 días consecutivos de historia para baselines.")
+        print("No hay fechas con historial suficiente para los dos baselines.")
         return None
 
     reales = y_evaluacion.loc[fechas_comunes]
     resultados = {
-        "Persistencia": calcular_metricas(
-            reales, pd.Series(pred_persistencia).loc[fechas_comunes]
-        ),
-        "Media móvil 7 días": calcular_metricas(
-            reales, pd.Series(pred_media).loc[fechas_comunes]
-        ),
+        nombre: calcular_metricas(reales, prediccion)
+        for nombre, prediccion in baselines.loc[fechas_comunes].items()
     }
     for nombre, modelo in modelos.items():
         resultados[nombre] = calcular_metricas(
             reales, modelo.predict(X_evaluacion.loc[fechas_comunes])
         )
-    tabla = pd.DataFrame(resultados).T.sort_values("MAE")
+    tabla = pd.DataFrame(resultados).T.assign(Fechas=len(fechas_comunes)).sort_values("MAE")
     print(f"\nComparación en {len(fechas_comunes)} de {len(X_evaluacion)} fechas comunes:")
     print(tabla)
     if len(fechas_comunes) != len(X_evaluacion):
-        print("Algunas fechas fueron excluidas por saltos de días o historial insuficiente.")
+        print("Se excluyeron fechas sin observaciones disponibles en los 7 días previos.")
     return tabla
 
 
@@ -209,6 +196,7 @@ def evaluar_test_final(version=None, ruta_csv=None, forzar=False):
         "algoritmo": info["algoritmo"],
         "fecha_utc": datetime.now(timezone.utc).isoformat(),
         "n_test": int(len(y_test)),
+        "n_fechas_comunes": int(comparacion["Fechas"].iloc[0]) if comparacion is not None else 0,
         "metricas_test_completo": metricas_test,
         "comparacion_fechas_comunes": (
             comparacion.to_dict(orient="index") if comparacion is not None else None
