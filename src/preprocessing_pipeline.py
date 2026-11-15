@@ -367,14 +367,15 @@ def columnas_para_transformar(estado, columnas):
 def transformar_limpieza(df, estado, columnas=None):
     """Aplica la limpieza aprendida y devuelve las columnas en el orden solicitado."""
     columnas = estado['columnas'] if columnas is None else list(columnas)
-    X = df[columnas_para_transformar(estado, columnas)].copy()
+    X = df[columnas].copy()
     for grupo, imputador in estado['imputadores']:
         elegidas = [col for col in grupo if col in columnas]
         if elegidas:
-            valores = imputador.transform(X.reindex(columns=grupo))
+            # KNN calcula la distancia con las mediciones disponibles de su grupo.
+            valores = imputador.transform(df.reindex(columns=grupo))
             X[elegidas] = pd.DataFrame(valores, index=X.index, columns=grupo)[elegidas]
 
-    return aplicar_limites_outliers(X[columnas].copy(), estado['limites'])
+    return aplicar_limites_outliers(X, estado['limites'])
 
 
 def columnas_de_origen(columnas):
@@ -394,28 +395,34 @@ def columnas_de_origen(columnas):
     return sorted(origen)
 
 
-def cargar_excel(ruta, columnas):
-    """Unifica las hojas requeridas por nombre y alinea sus cierres diarios."""
-    hojas_requeridas = {}
-    for columna in columnas:
+def cargar_excel(ruta, columnas_requeridas, columnas_auxiliares=()):
+    """Unifica las hojas por nombre y alinea los auxiliares con el histórico requerido."""
+    requeridas = set(columnas_requeridas)
+    hojas = {}
+    for columna in sorted(requeridas.union(columnas_auxiliares)):
         nombre, separador, hoja = columna.rpartition(' (')
         if not separador or not hoja.endswith(')'):
             raise ValueError(f'No se puede identificar la hoja de la variable {columna!r}.')
-        hojas_requeridas.setdefault(hoja[:-1], []).append(nombre)
+        hojas.setdefault(hoja[:-1], {})[nombre] = columna in requeridas
 
-    tablas = []
+    tablas_requeridas, tablas_auxiliares = [], []
     faltantes = []
     claves = ['DIA', 'HORA']
     with pd.ExcelFile(ruta, engine='openpyxl') as libro:
-        for hoja, nombres in hojas_requeridas.items():
+        for hoja, mediciones in hojas.items():
+            obligatorias = [col for col, requerida in mediciones.items() if requerida]
             if hoja not in libro.sheet_names:
-                faltantes.append(f'Hoja {hoja!r}')
+                if obligatorias:
+                    faltantes.append(f'Hoja {hoja!r}')
                 continue
-            requeridas = claves + nombres
-            tabla = libro.parse(sheet_name=hoja, usecols=lambda col: col in requeridas)
-            ausentes = [col for col in requeridas if col not in tabla]
+            tabla = libro.parse(sheet_name=hoja, usecols=lambda col: col in claves or col in mediciones)
+            ausentes = [col for col in claves + obligatorias if col not in tabla]
             if ausentes:
-                faltantes.append(f'Hoja {hoja!r}, columnas: {", ".join(ausentes)}')
+                if obligatorias:
+                    faltantes.append(f'Hoja {hoja!r}, columnas: {", ".join(ausentes)}')
+                continue
+            nombres = [col for col in mediciones if col in tabla]
+            if not nombres:
                 continue
 
             tabla['DIA'] = pd.to_datetime(tabla['DIA'], errors='coerce', format='mixed').dt.normalize()
@@ -432,23 +439,27 @@ def cargar_excel(ruta, columnas):
             if cierre.any():
                 unificada.loc[cierre] = unificada.loc[cierre].mask(registros.nunique().loc[cierre] > 1)
             unificada.columns = [f'{col} ({hoja})' for col in nombres]
+            tablas = tablas_requeridas if obligatorias else tablas_auxiliares
             tablas.append(unificada)
 
     if faltantes:
         raise ValueError('Faltan datos requeridos en el Excel:\n- ' + '\n- '.join(faltantes))
-    return pd.concat(tablas, axis=1).sort_index().reset_index()
+    registros = pd.concat(tablas_requeridas, axis=1)
+    if tablas_auxiliares:
+        registros = registros.join(pd.concat(tablas_auxiliares, axis=1))
+    return registros.sort_index().reset_index()
 
 
 def preparar_excel_prediccion(ruta, preprocesador):
     """Transforma un Excel nuevo con el estado ajustado durante Train."""
     variables = preprocesador['variables']
     estado = preprocesador['limpieza']
-    necesarias = columnas_para_transformar(estado, variables)
-    registros = cargar_excel(ruta, columnas_de_origen(necesarias))
+    variables_con_auxiliares = columnas_para_transformar(estado, variables)
+    registros = cargar_excel(ruta, columnas_de_origen(variables), columnas_de_origen(variables_con_auxiliares))
     diario = preparar_cierres(registros, con_objetivo=False)
-    usa_clima = any(col in COLUMNAS_CLIMA for col in necesarias)
+    usa_clima = any(col in COLUMNAS_CLIMA for col in variables_con_auxiliares)
     features = crear_features(diario, clima=None if usa_clima else pd.DataFrame(), con_objetivo=False)
-    faltantes = sorted(set(necesarias) - set(features.columns))
+    faltantes = sorted(set(variables) - set(features.columns))
     if faltantes:
         raise ValueError(f'No se pudieron calcular las variables: {", ".join(faltantes)}.')
     X = transformar_limpieza(features, estado, variables).replace([np.inf, -np.inf], np.nan)
