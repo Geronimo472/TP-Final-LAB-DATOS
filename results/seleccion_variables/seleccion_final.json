@@ -1,0 +1,58 @@
+{
+  "fecha": "2026-11-14 21:41:21",
+  "metodo_elegido": "SelectKBest(f_regression)",
+  "k": 10,
+  "ajustado_con": "Train",
+  "variables_seleccionadas": [
+    "Frio (Kw) (Consolidado EE)",
+    "Frio (Kw) (Consolidado EE)_MediaMov_7d",
+    "KW Trafo 11 (Totalizadores Energia)",
+    "Frio (Kw) (Consolidado EE)_Lag_7",
+    "Frio (Kw) (Consolidado EE)_Lag_1",
+    "ET Bodega/Hl (Consolidado KPI)_MediaMov_7d",
+    "KW Trafo 11 (Totalizadores Energia)_MediaMov_7d",
+    "Agua Planta (Hl) (Consolidado Agua)",
+    "KW Cond 5. 6 y 9 (Totalizadores Energia)",
+    "FC Centec II (Totalizadores Agua)_MediaMov_7d"
+  ],
+  "metodos_comparados": {
+    "SelectKBest (ANOVA F)": [
+      "Frio (Kw) (Consolidado EE)",
+      "Frio (Kw) (Consolidado EE)_MediaMov_7d",
+      "KW Trafo 11 (Totalizadores Energia)",
+      "Frio (Kw) (Consolidado EE)_Lag_7",
+      "Frio (Kw) (Consolidado EE)_Lag_1",
+      "ET Bodega/Hl (Consolidado KPI)_MediaMov_7d",
+      "KW Trafo 11 (Totalizadores Energia)_MediaMov_7d",
+      "Agua Planta (Hl) (Consolidado Agua)",
+      "KW Cond 5. 6 y 9 (Totalizadores Energia)",
+      "FC Centec II (Totalizadores Agua)_MediaMov_7d"
+    ],
+    "RFE (Random Forest)": [
+      "Frio (Kw) (Consolidado EE)",
+      "Frio (Kw) (Consolidado EE)_MediaMov_7d",
+      "KW Laboratorio (Totalizadores Energia)",
+      "ET Bodega/Hl (Consolidado KPI)_MediaMov_7d",
+      "HL Mosto Tecate (Totalizadores Produccion)_MediaMov_7d",
+      "FC Centec II (Totalizadores Agua)_MediaMov_7d",
+      "Kw Molino (Totalizadores Energia)",
+      "Bodega (Kw) (Consolidado EE)_MediaMov_7d",
+      "ET Cocina/Hl (Consolidado KPI)_Lag_1",
+      "ET Servicios (Mj) (Consolidado GasVapor)_MediaMov_7d"
+    ],
+    "Lasso": [
+      "Frio (Kw) (Consolidado EE)",
+      "KW Secador Kaeser (Totalizadores Energia)",
+      "Vapor Servicio (Kg) (Consolidado GasVapor)_MediaMov_7d",
+      "Hl Cerveza Filtrada (Consolidado Produccion)_MediaMov_7d",
+      "Vapor Servicio (Kg) (Consolidado GasVapor)",
+      "KW Cond 5. 6 y 9 (Totalizadores Energia)",
+      "KW Trafo 11 (Totalizadores Energia)_MediaMov_7d",
+      "Aire Envasado (M3) (Consolidado Aire)_MediaMov_7d",
+      "Totalizador_Filtracion (Totalizadores CO2)_Lag_1",
+      "Nivel Tk Restos Lev (Totalizadores Produccion)"
+    ]
+  },
+  "lasso_alpha_train": 136.2133993907046,
+  "lasso_variables_no_nulas_train": 77
+}
