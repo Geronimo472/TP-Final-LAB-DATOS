@@ -174,7 +174,7 @@ Se entrenan y comparan los modelos:
 
 Se calculan las métricas MAE, RMSE y R² utilizando el conjunto de validación.
 
-También se consideran los baselines de persistencia y media móvil de siete días.
+Validation y Test usan los mismos baselines. Persistencia toma la última observación disponible. La media móvil promedia las observaciones disponibles de los siete días previos. En Test se reporta el número de fechas en las que se pudo comparar el modelo con ambos baselines.
 
 ### Etapa 4 — Modelo final
 
