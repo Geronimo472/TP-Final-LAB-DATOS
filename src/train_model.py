@@ -155,6 +155,7 @@ def crear_modelo(nombre, params=None):
             **params, random_state=SEMILLA, n_jobs=1, verbosity=-1
         )
     elif nombre == "Ridge":
+        params.setdefault("random_state", SEMILLA)
         estimador = Ridge(**params)
         return make_pipeline(
             SimpleImputer(strategy="median", keep_empty_features=True),
