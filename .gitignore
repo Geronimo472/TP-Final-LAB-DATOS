@@ -17,12 +17,14 @@ __pycache__/
 
 # Ignorar datos procesados generados por código
 data/processed/*.csv
+data/processed/preprocesador.joblib
 !data/processed/.gitkeep
 
 # Resultados detallados de cada trial de Optuna (se regeneran al optimizar)
 /results/optuna_trials_*.csv
 
-# Modelos binarios entrenados; best_params.json sí se versiona
+# Modelos experimentales; los modelos finales con versión sí se guardan en Git
 /models/*.joblib
 /models/*.pkl
 /models/*.pickle
+!/models/modelo_v*.pkl

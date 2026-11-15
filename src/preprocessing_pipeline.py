@@ -6,6 +6,7 @@ import datetime
 import warnings
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
 import requests
@@ -22,6 +23,8 @@ warnings.filterwarnings('ignore', category=UserWarning)
 # Cantidad de variables que conserva SelectKBest (ANOVA F). La comparación con RFE y Lasso
 # que justifica el método y el valor de k está en notebooks/seleccion_variables.ipynb.
 K_VARIABLES = 10
+COLUMNA_FRIO = 'Frio (Kw) (Consolidado EE)'
+TARGET = 'Target_Frio_Dia_Siguiente'
 
 # ==============================================================================
 # 1. DEFINICIÓN DEL PIPELINE DE SCIKIT-LEARN (ESCALADO Y ASIMETRÍA)
@@ -72,7 +75,11 @@ def cargar_y_limpiar_registros(ruta_csv_entrada: Path) -> pd.DataFrame:
     """Filtra días incompletos/excedidos, días sin reinicio a las 00:00 y recorta a las 23:59."""
     print(f"[1/6] Cargando dataset desde {ruta_csv_entrada}...")
     df_final = pd.read_csv(ruta_csv_entrada, parse_dates=["DIA"], low_memory=False)
+    return preparar_cierres(df_final)
 
+
+def preparar_cierres(df_final: pd.DataFrame, *, con_objetivo=True) -> pd.DataFrame:
+    """Aplica las mismas reglas horarias a datos históricos y a un Excel nuevo."""
     # Filtrar días que no tengan exactamente 25 registros
     conteo_horas = df_final.groupby('DIA').size()
     dias_incompletos = conteo_horas[conteo_horas < 25].index
@@ -84,10 +91,10 @@ def cargar_y_limpiar_registros(ruta_csv_entrada: Path) -> pd.DataFrame:
     # Filtrar días sin reinicio en el totalizador de frío a las 00:00:00 (umbral = 100 kW)
     df_final['HORA'] = df_final['HORA'].astype(str).str.strip()
     df_medianoche = df_final[df_final['HORA'].str.startswith('00:00:00')].copy()
-    col_frio = [c for c in df_final.columns if 'Frio' in c and 'Kw' in c][0]
+    frio_medianoche = pd.to_numeric(df_medianoche[COLUMNA_FRIO], errors='coerce')
 
     umbral_reinicio = 100
-    dias_sin_reinicio = df_medianoche[df_medianoche[col_frio] > umbral_reinicio]['DIA'].unique()
+    dias_sin_reinicio = df_medianoche.loc[frio_medianoche > umbral_reinicio, 'DIA'].unique()
     df_final_limpio = df_final[~df_final['DIA'].isin(dias_sin_reinicio)].copy()
 
     # Quedarnos con el cierre diario (23:59:00) y forzar grilla diaria continua ('D')
@@ -98,13 +105,6 @@ def cargar_y_limpiar_registros(ruta_csv_entrada: Path) -> pd.DataFrame:
     df_diario = df_diario.drop(columns=['HORA'], errors='ignore').set_index('DIA').sort_index()
     df_diario = df_diario.asfreq('D')
 
-    # Crear variable objetivo usando exactamente el día calendario siguiente.
-    col_objetivo = 'Frio (Kw) (Consolidado EE)'
-    dia_siguiente = df_diario.index + pd.Timedelta(days=1)
-    df_diario['Target_Frio_Dia_Siguiente'] = (
-        df_diario[col_objetivo].reindex(dia_siguiente).to_numpy()
-    )
-
     # Reemplazar errores de Excel por NaN y asegurar tipo numérico
     df_diario = df_diario.replace(
         ['#VALUE!', '#DIV/0!', '#REF!', '#N/A', '#NAME?', '#NULL!', '#NUM!', ''],
@@ -113,37 +113,70 @@ def cargar_y_limpiar_registros(ruta_csv_entrada: Path) -> pd.DataFrame:
     for col in df_diario.columns:
         df_diario[col] = pd.to_numeric(df_diario[col], errors='coerce')
 
+    if con_objetivo:
+        dia_siguiente = df_diario.index + pd.Timedelta(days=1)
+        df_diario[TARGET] = df_diario[COLUMNA_FRIO].reindex(dia_siguiente).to_numpy()
     return df_diario
 
 
-def auditar_sensores_muertos(df_diario: pd.DataFrame) -> pd.DataFrame:
-    """Detecta y elimina sensores muertos evaluando exclusivamente el 70% inicial (Train)."""
+def fechas_modelables(df_diario: pd.DataFrame) -> pd.DatetimeIndex:
+    """Devuelve las fechas con frío observado hoy y al día siguiente."""
+    return df_diario.dropna(subset=[COLUMNA_FRIO, TARGET]).index
+
+
+def auditar_sensores_muertos(df_diario: pd.DataFrame, *, hasta=None) -> pd.DataFrame:
+    """Elimina sensores con más de 95% de nulos en el tramo final del ajuste."""
     print("[2/6] Auditando sensores muertos en Train...")
-    df_temp = df_diario.copy()
-    dias_validos_mask = df_temp['Frio (Kw) (Consolidado EE)'].notna()
-    df_temp_validos = df_temp[dias_validos_mask]
+    dias_validos = df_diario.loc[df_diario[COLUMNA_FRIO].notna()]
+    if hasta is None:
+        df_train_audit = dias_validos.iloc[:int(len(dias_validos) * 0.70)]
+    else:
+        df_train_audit = dias_validos.loc[:hasta]
 
-    n_train_validos = int(len(df_temp_validos) * 0.70)
-    df_train_audit = df_temp_validos.iloc[:n_train_validos]
-
-    n = len(df_train_audit)
-    corte_70 = int(n * 0.70)
+    corte_70 = int(len(df_train_audit) * 0.70)
     nulos_fin = df_train_audit.iloc[corte_70:].isnull().mean()
-
-    mask_muertos = nulos_fin > 0.95
-    vector_sensores_muertos = df_train_audit.columns[mask_muertos].tolist()
-
-    df_diario = df_temp.drop(columns=vector_sensores_muertos)
-    print(f"      -> Sensores muertos eliminados: {len(vector_sensores_muertos)}")
-    return df_diario
+    sensores_muertos = nulos_fin.drop(labels=[COLUMNA_FRIO, TARGET]).loc[lambda s: s > 0.95].index
+    print(f"      -> Sensores muertos eliminados: {len(sensores_muertos)}")
+    return df_diario.drop(columns=sensores_muertos)
 
 
-def crear_features(df_diario: pd.DataFrame) -> pd.DataFrame:
+PARES_EFICIENCIA = [
+    ('EE Planta / Hl (Consolidado KPI)', 'Meta EE Planta (Consolidado KPI)'),
+    ('Agua Planta / Hl (Consolidado KPI)', 'Meta Agua Planta (Consolidado KPI)'),
+    ('ET Planta / Hl (Consolidado KPI)', 'Meta ET Planta (Consolidado KPI)'),
+    ('Aire Planta / Hl (Consolidado KPI)', 'Meta Aire Planta (Consolidado KPI)'),
+    ('EE Elaboracion / Hl (Consolidado KPI)', 'Meta EE Elaboracion (Consolidado KPI)'),
+    ('EE Bodega / Hl (Consolidado KPI)', 'Meta EE Bodega (Consolidado KPI)'),
+    ('EE Cocina / Hl (Consolidado KPI)', 'Meta EE Cocina (Consolidado KPI)'),
+    ('EE Envasado / Hl (Consolidado KPI)', 'Meta EE Envasado (Consolidado KPI)'),
+    ('EE Frio / Hl (Consolidado KPI)', 'Meta EE Frio (Consolidado KPI)'),
+    ('Agua Elab / Hl (Consolidado KPI)', 'Meta Agua Elab (Consolidado KPI)'),
+    ('Agua Bodega / Hl (Consolidado KPI)', 'Meta Agua Bodega (Consolidado KPI)'),
+    ('Agua Cocina / Hl (Consolidado KPI)', 'Meta Agua Cocina (Consolidado KPI)'),
+    ('Agua Envas / Hl (Consolidado KPI)', 'Meta Agua Envas (Consolidado KPI)')
+]
+
+EFICIENCIAS = {
+    f"Eficiencia_{real.split('/')[0].strip()}": (real, meta)
+    for real, meta in PARES_EFICIENCIA
+}
+COLUMNA_EE_FRIO = 'EE Frio / Hl (Consolidado KPI)'
+DERIVADAS_FRIO = {
+    'Ratio_Frio_vs_ProdBodega': ('Hl Producido Bodega (Consolidado Produccion)', 'ratio'),
+    'Ratio_Frio_vs_Mosto': ('Hl de Mosto (Consolidado Produccion)', 'ratio'),
+    'Interaccion_Frio_CervezaFiltrada': ('Hl Cerveza Filtrada (Consolidado Produccion)', 'producto'),
+    'Interaccion_Frio_Cocimientos': ('Cocimientos Diarios (Consolidado Produccion)', 'producto'),
+}
+CALENDARIO = ('Anio', 'Mes', 'Dia_Semana', 'Es_Fin_De_Semana')
+COLUMNAS_CLIMA = ('Temp_Media_Tecate', 'Temp_Max_Tecate', 'Temp_Min_Tecate')
+SUFIJOS_TEMPORALES = ('_Lag_1', '_Lag_7', '_MediaMov_7d')
+
+
+def crear_features(df_diario: pd.DataFrame, *, clima=None, con_objetivo=True) -> pd.DataFrame:
     """Genera variables de calendario, lags, medias móviles, ratios, interacciones y clima."""
     print("[3/6] Ejecutando Feature Engineering...")
-    target = 'Target_Frio_Dia_Siguiente'
-    col_objetivo = 'Frio (Kw) (Consolidado EE)'
 
+    df_diario = df_diario.copy()
     if not isinstance(df_diario.index, pd.DatetimeIndex):
         df_diario.index = pd.to_datetime(df_diario.index)
 
@@ -155,7 +188,7 @@ def crear_features(df_diario: pd.DataFrame) -> pd.DataFrame:
 
     # Lags y Medias Móviles
     cols_para_features = df_diario.select_dtypes(include=[np.number]).columns.drop(
-        [target, 'Anio', 'Mes', 'Dia_Semana', 'Es_Fin_De_Semana'], errors='ignore'
+        [TARGET, *CALENDARIO], errors='ignore'
     )
 
     nuevas_cols_lag = {}
@@ -167,57 +200,33 @@ def crear_features(df_diario: pd.DataFrame) -> pd.DataFrame:
         )
 
     df_diario = pd.concat([df_diario, pd.DataFrame(nuevas_cols_lag, index=df_diario.index)], axis=1)
-    df_diario = df_diario.dropna(subset=[col_objetivo, target]).copy()
+    columnas_validas = [COLUMNA_FRIO, TARGET] if con_objetivo else [COLUMNA_FRIO]
+    df_diario = df_diario.dropna(subset=columnas_validas).copy()
+    if df_diario.empty:
+        raise ValueError("No hay días válidos con cierre de Frío a las 23:59.")
 
-    # Eficiencia energética (Real vs Meta)
     epsilon = 1e-5
-    pares_eficiencia = [
-        ('EE Planta / Hl (Consolidado KPI)', 'Meta EE Planta (Consolidado KPI)'),
-        ('Agua Planta / Hl (Consolidado KPI)', 'Meta Agua Planta (Consolidado KPI)'),
-        ('ET Planta / Hl (Consolidado KPI)', 'Meta ET Planta (Consolidado KPI)'),
-        ('Aire Planta / Hl (Consolidado KPI)', 'Meta Aire Planta (Consolidado KPI)'),
-        ('EE Elaboracion / Hl (Consolidado KPI)', 'Meta EE Elaboracion (Consolidado KPI)'),
-        ('EE Bodega / Hl (Consolidado KPI)', 'Meta EE Bodega (Consolidado KPI)'),
-        ('EE Cocina / Hl (Consolidado KPI)', 'Meta EE Cocina (Consolidado KPI)'),
-        ('EE Envasado / Hl (Consolidado KPI)', 'Meta EE Envasado (Consolidado KPI)'),
-        ('EE Frio / Hl (Consolidado KPI)', 'Meta EE Frio (Consolidado KPI)'),
-        ('Agua Elab / Hl (Consolidado KPI)', 'Meta Agua Elab (Consolidado KPI)'),
-        ('Agua Bodega / Hl (Consolidado KPI)', 'Meta Agua Bodega (Consolidado KPI)'),
-        ('Agua Cocina / Hl (Consolidado KPI)', 'Meta Agua Cocina (Consolidado KPI)'),
-        ('Agua Envas / Hl (Consolidado KPI)', 'Meta Agua Envas (Consolidado KPI)')
-    ]
-    for real_col, meta_col in pares_eficiencia:
-        if real_col in df_diario.columns and meta_col in df_diario.columns:
-            nombre_eficiencia = f"Eficiencia_{real_col.split('/')[0].strip()}"
-            df_diario[nombre_eficiencia] = df_diario[real_col] / (df_diario[meta_col] + epsilon)
+    for nombre, (real, meta) in EFICIENCIAS.items():
+        if real in df_diario and meta in df_diario:
+            df_diario[nombre] = df_diario[real] / (df_diario[meta] + epsilon)
+    for nombre, (otra, operacion) in DERIVADAS_FRIO.items():
+        if COLUMNA_EE_FRIO in df_diario and otra in df_diario:
+            frio = df_diario[COLUMNA_EE_FRIO]
+            df_diario[nombre] = frio / (df_diario[otra] + epsilon) if operacion == 'ratio' else frio * df_diario[otra]
 
-    # Ratios e Interacciones térmicas de frío
-    if 'EE Frio / Hl (Consolidado KPI)' in df_diario.columns:
-        if 'Hl Producido Bodega (Consolidado Produccion)' in df_diario.columns:
-            df_diario['Ratio_Frio_vs_ProdBodega'] = (
-                df_diario['EE Frio / Hl (Consolidado KPI)'] /
-                (df_diario['Hl Producido Bodega (Consolidado Produccion)'] + epsilon)
-            )
-        if 'Hl de Mosto (Consolidado Produccion)' in df_diario.columns:
-            df_diario['Ratio_Frio_vs_Mosto'] = (
-                df_diario['EE Frio / Hl (Consolidado KPI)'] /
-                (df_diario['Hl de Mosto (Consolidado Produccion)'] + epsilon)
-            )
-        if 'Hl Cerveza Filtrada (Consolidado Produccion)' in df_diario.columns:
-            df_diario['Interaccion_Frio_CervezaFiltrada'] = (
-                df_diario['EE Frio / Hl (Consolidado KPI)'] *
-                df_diario['Hl Cerveza Filtrada (Consolidado Produccion)']
-            )
-        if 'Cocimientos Diarios (Consolidado Produccion)' in df_diario.columns:
-            df_diario['Interaccion_Frio_Cocimientos'] = (
-                df_diario['EE Frio / Hl (Consolidado KPI)'] *
-                df_diario['Cocimientos Diarios (Consolidado Produccion)']
-            )
+    if clima is None:
+        clima = cargar_clima(df_diario.index)
+    if not clima.empty:
+        df_diario = df_diario.join(clima, how='left')
+        df_diario[clima.columns] = df_diario[clima.columns].ffill()
+    return df_diario
 
-    # Integración climática de Tecate vía API Open-Meteo
+
+def cargar_clima(fechas: pd.DatetimeIndex) -> pd.DataFrame:
+    """Obtiene el clima de Tecate para el intervalo de fechas solicitado."""
     lat, lon = 32.5714, -116.6275
-    fecha_inicio = df_diario.index.min().strftime('%Y-%m-%d')
-    fecha_fin = df_diario.index.max().strftime('%Y-%m-%d')
+    fecha_inicio = fechas.min().strftime('%Y-%m-%d')
+    fecha_fin = fechas.max().strftime('%Y-%m-%d')
     url = (
         f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}"
         f"&start_date={fecha_inicio}&end_date={fecha_fin}"
@@ -228,60 +237,54 @@ def crear_features(df_diario: pd.DataFrame) -> pd.DataFrame:
         response.raise_for_status()
         data = response.json()
         if "daily" in data:
-            df_clima = pd.DataFrame({
+            return pd.DataFrame({
                 'Fecha': pd.to_datetime(data['daily']['time']),
                 'Temp_Media_Tecate': data['daily']['temperature_2m_mean'],
                 'Temp_Max_Tecate': data['daily']['temperature_2m_max'],
                 'Temp_Min_Tecate': data['daily']['temperature_2m_min']
             }).set_index('Fecha')
-            df_diario = df_diario.join(df_clima, how='left')
-            for col_c in ['Temp_Media_Tecate', 'Temp_Max_Tecate', 'Temp_Min_Tecate']:
-                df_diario[col_c] = df_diario[col_c].ffill()
     except Exception as exc:
         raise RuntimeError(
             "No se pudieron obtener los datos de Open-Meteo. "
             "El pipeline se detiene para no generar un dataset diferente sin avisar."
         ) from exc
 
-    return df_diario
+    return pd.DataFrame()
 
 
-def aplicar_limpieza_outliers(df_train, df_val, df_test, umbral_z=3.5, lower_q=0.01, upper_q=0.99):
-    """Acota outliers mediante Z-Modificada (MAD) y Winsorización ajustados SOLO en Train."""
-    tr, va, te = df_train.copy(), df_val.copy(), df_test.copy()
-    cols_numericas = [
-        col for col in tr.select_dtypes(include=[np.number]).columns
-        if col != 'Target_Frio_Dia_Siguiente'
-    ]
-
-    for col in cols_numericas:
-        mediana = tr[col].median()
-        mad = np.median(np.abs(tr[col] - mediana))
+def ajustar_limites_outliers(X_train):
+    """Aprende los límites de Z modificada y winsorización."""
+    limites = {}
+    for columna, valores in X_train.items():
+        mediana = valores.median()
+        mad = np.median(np.abs(valores - mediana))
         if mad > 0:
-            lim_inf_z = mediana - (umbral_z * mad / 0.6745)
-            lim_sup_z = mediana + (umbral_z * mad / 0.6745)
-            tr[col] = tr[col].clip(lower=lim_inf_z, upper=lim_sup_z)
-            va[col] = va[col].clip(lower=lim_inf_z, upper=lim_sup_z)
-            te[col] = te[col].clip(lower=lim_inf_z, upper=lim_sup_z)
+            amplitud = 3.5 * mad / 0.6745
+            valores = valores.clip(lower=mediana - amplitud, upper=mediana + amplitud)
 
-        p_inf = tr[col].quantile(lower_q)
-        p_sup = tr[col].quantile(upper_q)
-        tr[col] = tr[col].clip(lower=p_inf, upper=p_sup)
-        va[col] = va[col].clip(lower=p_inf, upper=p_sup)
-        te[col] = te[col].clip(lower=p_inf, upper=p_sup)
-
-    return tr, va, te
+        # Los cuantiles ya están dentro de los límites de Z modificada.
+        limites[columna] = (valores.quantile(0.01), valores.quantile(0.99))
+    return limites
 
 
-def filtrar_imputar_y_dividir(df_diario: pd.DataFrame):
-    """Filtra redundancia/significancia en Train, divide 70/15/15, imputa nulos y limpia outliers."""
-    print("[4/6] Filtrando redundancia, dividiendo (70/15/15), imputando y tratando outliers...")
-    target = 'Target_Frio_Dia_Siguiente'
-    n_train = int(len(df_diario) * 0.70)
-    df_train_only = df_diario.iloc[:n_train]
+def aplicar_limites_outliers(datos, limites):
+    for columna in datos.columns:
+        inferior, superior = limites[columna]
+        datos[columna] = datos[columna].clip(lower=inferior, upper=superior)
+    return datos
 
+
+def dividir_temporalmente(datos):
+    """Divide datos ordenados cronológicamente en Train, Validation y Test (70/15/15)."""
+    desarrollo, test = train_test_split(datos, test_size=0.15, shuffle=False)
+    train, val = train_test_split(desarrollo, test_size=0.15 / 0.85, shuffle=False)
+    return train, val, test
+
+
+def ajustar_limpieza(df_train):
+    """Ajusta los filtros, imputadores y límites con las filas de entrenamiento."""
     # 1. Filtro de Redundancia (|r| >= 0.90) en Train
-    X_features_train = df_train_only.drop(columns=[target]).select_dtypes(include=[np.number])
+    X_features_train = df_train.drop(columns=[TARGET]).select_dtypes(include=[np.number])
     matriz_corr = X_features_train.corr().abs()
     upper_tri = matriz_corr.where(np.triu(np.ones(matriz_corr.shape), k=1).astype(bool))
 
@@ -290,96 +293,183 @@ def filtrar_imputar_y_dividir(df_diario: pd.DataFrame):
         correlacionadas = upper_tri.index[upper_tri[col] >= 0.90].tolist()
         if correlacionadas:
             grupo = correlacionadas + [col]
-            mejor_var = df_train_only[grupo].corrwith(df_train_only[target]).abs().idxmax()
+            mejor_var = df_train[grupo].corrwith(df_train[TARGET]).abs().idxmax()
             for c in grupo:
                 if c != mejor_var:
                     cols_a_eliminar_red.add(c)
 
-    df_sin_redundancia = df_diario.drop(columns=list(cols_a_eliminar_red))
-
     # 2. Filtro de P-Value (p < 0.05) en Train
-    df_train_sin_red = df_sin_redundancia.iloc[:n_train]
-    X_final_candidatas = df_train_sin_red.drop(columns=[target]).select_dtypes(include=[np.number])
+    df_train_sin_red = df_train.drop(columns=list(cols_a_eliminar_red))
+    X_final_candidatas = df_train_sin_red.drop(columns=[TARGET]).select_dtypes(include=[np.number])
     variables_significativas = []
 
     for col in X_final_candidatas.columns:
-        datos_validos = df_train_sin_red[[col, target]].dropna()
+        datos_validos = df_train_sin_red[[col, TARGET]].dropna()
         if len(datos_validos) > 2 and datos_validos[col].nunique() > 1:
-            _, p_value = pearsonr(datos_validos[col], datos_validos[target])
+            _, p_value = pearsonr(datos_validos[col], datos_validos[TARGET])
             if p_value < 0.05:
                 variables_significativas.append(col)
 
-    df_diario = df_sin_redundancia[variables_significativas + [target]].copy()
-
-    # 3. Eliminar columnas vacías, 'Unnamed' y patrones administrativos ('Meta', 'Id ', etc.)
-    df_diario = df_diario.dropna(axis=1, how='all')
-    df_diario = df_diario.loc[:, ~df_diario.columns.str.contains('Unnamed', case=False, na=False)]
-
+    # 3. Eliminar columnas auxiliares y patrones administrativos.
     patrones_a_eliminar = ['Meta', 'Id ', 'Auxiliar', 'Ultimo Dato']
-    columnas_a_conservar = [
-        col for col in df_diario.columns
-        if not any(p.lower() in str(col).lower() for p in patrones_a_eliminar) or col in ['DIA', 'HORA']
+    columnas = [
+        col for col in variables_significativas
+        if 'unnamed' not in col.lower()
+        and (col in ['DIA', 'HORA'] or not any(p.lower() in col.lower() for p in patrones_a_eliminar))
     ]
-    df_diario = df_diario[columnas_a_conservar]
+    X_train = df_train[columnas].copy()
 
-    # 4. Identificar sensores incorporados tarde en Train
-    df_train_check = df_diario.iloc[:n_train]
-    inicio_corte = int(n_train * 0.30)
-    fin_corte = int(n_train * 0.70)
-    sensores_protegidos = []
+    # 4. Proteger los sensores incorporados tarde durante el tramo de ajuste.
+    inicio_corte = int(len(X_train) * 0.30)
+    fin_corte = int(len(X_train) * 0.70)
+    sensores_protegidos = (
+        (X_train.iloc[:inicio_corte].isna().mean() > 0.50)
+        & (X_train.iloc[fin_corte:].isna().mean() < 0.20)
+    )
 
-    for col in df_train_check.columns:
-        if col == target:
-            continue
-        serie = df_train_check[col]
-        if serie.iloc[:inicio_corte].isnull().mean() > 0.50 and serie.iloc[fin_corte:].isnull().mean() < 0.20:
-            sensores_protegidos.append(col)
+    # 5. Elegir la imputación a partir del porcentaje de nulos en Train.
+    porcentaje_nulos = X_train.loc[:, ~sensores_protegidos].isna().mean() * 100
+    cols_media = porcentaje_nulos[(porcentaje_nulos > 0) & (porcentaje_nulos < 1)].index
+    cols_knn = porcentaje_nulos[porcentaje_nulos.between(1, 45)].index
+    cols_descartadas = porcentaje_nulos[porcentaje_nulos > 45].index
+    columnas_finales = X_train.columns.drop(cols_descartadas)
+    # Mantener el orden de salida del pipeline original.
+    protegidas = sensores_protegidos[sensores_protegidos].index
+    columnas_finales = columnas_finales.drop(protegidas).append(protegidas)
+    X_train = X_train[columnas_finales].copy()
+    imputadores = []
+    for cols, imputador in (
+        (cols_media, SimpleImputer(strategy='mean')),
+        (cols_knn, KNNImputer(n_neighbors=5)),
+    ):
+        if len(cols):
+            X_train[cols] = imputador.fit_transform(X_train[cols])
+            imputadores.append((cols.tolist(), imputador))
 
-    # 5. División Temporal (Train 70% / Val 15% / Test 15%)
-    X = df_diario.drop(columns=[target])
-    y = df_diario[target]
+    limites = ajustar_limites_outliers(X_train)
+    estado = {
+        'columnas': columnas_finales.tolist(),
+        'imputadores': imputadores,
+        'limites': limites,
+    }
+    return aplicar_limites_outliers(X_train, limites), estado
 
-    X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=0.15, shuffle=False)
-    val_prop = 0.15 / 0.85
-    X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=val_prop, shuffle=False)
 
-    # 6. Imputación MCAR (<1%) y MAR (1%-45%) protegiendo sensores nuevos
-    cols_normales = [col for col in X_train.columns if col not in sensores_protegidos]
-    X_train_norm, X_train_prot = X_train[cols_normales].copy(), X_train[sensores_protegidos].copy()
-    X_val_norm, X_val_prot     = X_val[cols_normales].copy(), X_val[sensores_protegidos].copy()
-    X_test_norm, X_test_prot   = X_test[cols_normales].copy(), X_test[sensores_protegidos].copy()
+def columnas_para_transformar(estado, columnas):
+    """Incluye las variables auxiliares que determinan las distancias de KNN."""
+    necesarias = list(columnas)
+    for grupo, imputador in estado['imputadores']:
+        if isinstance(imputador, KNNImputer) and set(columnas).intersection(grupo):
+            necesarias.extend(grupo)
+    return list(dict.fromkeys(necesarias))
 
-    porcentaje_nulos = (X_train_norm.isnull().sum() / len(X_train_norm)) * 100
-    cols_mcar = porcentaje_nulos[(porcentaje_nulos > 0) & (porcentaje_nulos < 1.0)].index.tolist()
-    cols_mar  = porcentaje_nulos[(porcentaje_nulos >= 1.0) & (porcentaje_nulos <= 45.0)].index.tolist()
-    cols_mnar = porcentaje_nulos[porcentaje_nulos > 45.0].index.tolist()
 
-    X_train_norm = X_train_norm.drop(columns=cols_mnar, errors='ignore')
-    X_val_norm   = X_val_norm.drop(columns=cols_mnar, errors='ignore')
-    X_test_norm  = X_test_norm.drop(columns=cols_mnar, errors='ignore')
+def transformar_limpieza(df, estado, columnas=None):
+    """Aplica la limpieza aprendida y devuelve las columnas en el orden solicitado."""
+    columnas = estado['columnas'] if columnas is None else list(columnas)
+    X = df[columnas_para_transformar(estado, columnas)].copy()
+    for grupo, imputador in estado['imputadores']:
+        elegidas = [col for col in grupo if col in columnas]
+        if elegidas:
+            valores = imputador.transform(X.reindex(columns=grupo))
+            X[elegidas] = pd.DataFrame(valores, index=X.index, columns=grupo)[elegidas]
 
-    cols_mcar_activas = [c for c in cols_mcar if c in X_train_norm.columns]
-    if len(cols_mcar_activas) > 0:
-        imputer_mcar = SimpleImputer(strategy='mean')
-        X_train_norm[cols_mcar_activas] = imputer_mcar.fit_transform(X_train_norm[cols_mcar_activas])
-        X_val_norm[cols_mcar_activas]   = imputer_mcar.transform(X_val_norm[cols_mcar_activas])
-        X_test_norm[cols_mcar_activas]  = imputer_mcar.transform(X_test_norm[cols_mcar_activas])
+    return aplicar_limites_outliers(X[columnas].copy(), estado['limites'])
 
-    cols_mar_activas = [c for c in cols_mar if c in X_train_norm.columns]
-    if len(cols_mar_activas) > 0:
-        imputer_mar = KNNImputer(n_neighbors=5)
-        X_train_norm[cols_mar_activas] = imputer_mar.fit_transform(X_train_norm[cols_mar_activas])
-        X_val_norm[cols_mar_activas]   = imputer_mar.transform(X_val_norm[cols_mar_activas])
-        X_test_norm[cols_mar_activas]  = imputer_mar.transform(X_test_norm[cols_mar_activas])
 
-    X_train = pd.concat([X_train_norm, X_train_prot], axis=1)
-    X_val   = pd.concat([X_val_norm, X_val_prot], axis=1)
-    X_test  = pd.concat([X_test_norm, X_test_prot], axis=1)
+def columnas_de_origen(columnas):
+    """Resuelve las columnas de Excel a partir de las variables del modelo."""
+    origen = {COLUMNA_FRIO}
+    for columna in columnas:
+        for sufijo in SUFIJOS_TEMPORALES:
+            if columna.endswith(sufijo):
+                columna = columna.removesuffix(sufijo)
+                break
+        if columna in EFICIENCIAS:
+            origen.update(EFICIENCIAS[columna])
+        elif columna in DERIVADAS_FRIO:
+            origen.update((COLUMNA_EE_FRIO, DERIVADAS_FRIO[columna][0]))
+        elif columna not in CALENDARIO and columna not in COLUMNAS_CLIMA:
+            origen.add(columna)
+    return sorted(origen)
 
-    # 7. Limpieza de Outliers (Z-Modificada + Winsorización)
-    X_train_limpio, X_val_limpio, X_test_limpio = aplicar_limpieza_outliers(X_train, X_val, X_test)
 
-    return X_train_limpio, X_val_limpio, X_test_limpio, y_train, y_val, y_test
+def cargar_excel(ruta, columnas):
+    """Unifica las hojas requeridas por nombre y alinea sus cierres diarios."""
+    hojas_requeridas = {}
+    for columna in columnas:
+        nombre, separador, hoja = columna.rpartition(' (')
+        if not separador or not hoja.endswith(')'):
+            raise ValueError(f'No se puede identificar la hoja de la variable {columna!r}.')
+        hojas_requeridas.setdefault(hoja[:-1], []).append(nombre)
+
+    tablas = []
+    faltantes = []
+    claves = ['DIA', 'HORA']
+    with pd.ExcelFile(ruta, engine='openpyxl') as libro:
+        for hoja, nombres in hojas_requeridas.items():
+            if hoja not in libro.sheet_names:
+                faltantes.append(f'Hoja {hoja!r}')
+                continue
+            requeridas = claves + nombres
+            tabla = libro.parse(sheet_name=hoja, usecols=lambda col: col in requeridas)
+            ausentes = [col for col in requeridas if col not in tabla]
+            if ausentes:
+                faltantes.append(f'Hoja {hoja!r}, columnas: {", ".join(ausentes)}')
+                continue
+
+            tabla['DIA'] = pd.to_datetime(tabla['DIA'], errors='coerce', format='mixed').dt.normalize()
+            horas = tabla['HORA'].astype('string').str.strip().str.extract(
+                r'^([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$', expand=True,
+            )
+            tabla['HORA'] = horas[0].str.zfill(2) + ':' + horas[1] + ':' + horas[2].fillna('00')
+            cierres = tabla['HORA'].str.startswith('23:59:', na=False)
+            tabla.loc[cierres, 'HORA'] = '23:59:00'
+            tabla[nombres] = tabla[nombres].apply(pd.to_numeric, errors='coerce')
+            registros = tabla.dropna(subset=claves).groupby(claves, sort=False)[nombres]
+            unificada = registros.last()
+            cierre = unificada.index.get_level_values('HORA') == '23:59:00'
+            if cierre.any():
+                unificada.loc[cierre] = unificada.loc[cierre].mask(registros.nunique().loc[cierre] > 1)
+            unificada.columns = [f'{col} ({hoja})' for col in nombres]
+            tablas.append(unificada)
+
+    if faltantes:
+        raise ValueError('Faltan datos requeridos en el Excel:\n- ' + '\n- '.join(faltantes))
+    return pd.concat(tablas, axis=1).sort_index().reset_index()
+
+
+def preparar_excel_prediccion(ruta, preprocesador):
+    """Transforma un Excel nuevo con el estado ajustado durante Train."""
+    variables = preprocesador['variables']
+    estado = preprocesador['limpieza']
+    necesarias = columnas_para_transformar(estado, variables)
+    registros = cargar_excel(ruta, columnas_de_origen(necesarias))
+    diario = preparar_cierres(registros, con_objetivo=False)
+    usa_clima = any(col in COLUMNAS_CLIMA for col in necesarias)
+    features = crear_features(diario, clima=None if usa_clima else pd.DataFrame(), con_objetivo=False)
+    faltantes = sorted(set(necesarias) - set(features.columns))
+    if faltantes:
+        raise ValueError(f'No se pudieron calcular las variables: {", ".join(faltantes)}.')
+    X = transformar_limpieza(features, estado, variables).replace([np.inf, -np.inf], np.nan)
+    return X, X.index
+
+
+def filtrar_imputar_y_limpiar(df_train, *evaluaciones):
+    """Ajusta la limpieza en el tramo de entrenamiento de cada fold."""
+    X_train, estado = ajustar_limpieza(df_train)
+    return X_train, *(transformar_limpieza(df, estado) for df in evaluaciones)
+
+
+def filtrar_imputar_y_dividir(df_diario: pd.DataFrame, *, guardar_estado=False):
+    """Divide el dataset y ajusta la limpieza con Train completo."""
+    print("[4/6] Filtrando, imputando y tratando outliers (Train 70%, Validation y Test 15%).")
+    train, val, test = dividir_temporalmente(df_diario)
+    X_train, estado = ajustar_limpieza(train)
+    X_val = transformar_limpieza(val, estado)
+    X_test = transformar_limpieza(test, estado)
+    datos = X_train, X_val, X_test, train[TARGET], val[TARGET], test[TARGET]
+    return (*datos, estado) if guardar_estado else datos
 
 
 def seleccionar_variables_kbest(X_train_scaled: pd.DataFrame, y_train: pd.Series, k: int = K_VARIABLES):
@@ -429,7 +519,7 @@ def escalar_y_seleccionar_variables(X_train_limpio, X_val_limpio, X_test_limpio,
 
 def guardar_artefactos(
     X_train_limpio, X_val_limpio, X_test_limpio,
-    y_train, y_val, y_test, features_finales, dir_raiz: Path
+    y_train, y_val, y_test, features_finales, dir_raiz: Path, *, estado
 ):
     """Guarda dataset_final.csv (SIN ESCALAR), checksums.json y data_lineage.json."""
     print("[6/6] Exportando artefactos procesados y registros de versionado...")
@@ -452,7 +542,7 @@ def guardar_artefactos(
     df_dataset_final = pd.concat([train_sin_escalar, val_sin_escalar, test_sin_escalar]).sort_index()
 
     ruta_csv = processed_dir / "dataset_final.csv"
-    df_dataset_final.to_csv(ruta_csv, index=True)
+    df_dataset_final.to_csv(ruta_csv, index=True, lineterminator='\n')
     print(f"      -> Guardado: {ruta_csv} (Shape: {df_dataset_final.shape})")
 
     # Calcular SHA-256 y actualizar checksums.json
@@ -461,6 +551,17 @@ def guardar_artefactos(
         for byte_block in iter(lambda: f.read(4096), b""):
             sha256_hash.update(byte_block)
     checksum_val = sha256_hash.hexdigest()
+    variables = set(features_finales)
+    joblib.dump({
+        'dataset_sha256': checksum_val,
+        'variables': list(features_finales),
+        'limpieza': {
+            'columnas': list(features_finales),
+            'imputadores': [(grupo, imputador) for grupo, imputador in estado['imputadores']
+                            if variables.intersection(grupo)],
+            'limites': {col: estado['limites'][col] for col in features_finales},
+        },
+    }, processed_dir / 'preprocesador.joblib')
 
     ruta_checksums = dir_raiz / "data" / "checksums.json"
     checksums_data = {}
@@ -539,7 +640,8 @@ def ejecutar_pipeline_completo(ruta_entrada=None):
     df_diario = auditar_sensores_muertos(df_diario)
     df_diario = crear_features(df_diario)
 
-    X_train_limpio, X_val_limpio, X_test_limpio, y_train, y_val, y_test = filtrar_imputar_y_dividir(df_diario)
+    datos = filtrar_imputar_y_dividir(df_diario, guardar_estado=True)
+    X_train_limpio, X_val_limpio, X_test_limpio, y_train, y_val, y_test, estado = datos
 
     features_finales, X_train_final, X_val_final, X_test_final, _ = escalar_y_seleccionar_variables(
         X_train_limpio, X_val_limpio, X_test_limpio, y_train
@@ -547,7 +649,7 @@ def ejecutar_pipeline_completo(ruta_entrada=None):
 
     guardar_artefactos(
         X_train_limpio, X_val_limpio, X_test_limpio,
-        y_train, y_val, y_test, features_finales, dir_raiz
+        y_train, y_val, y_test, features_finales, dir_raiz, estado=estado
     )
     print("\n¡Pipeline de preprocesamiento ejecutado de punta a punta con éxito!")
 
