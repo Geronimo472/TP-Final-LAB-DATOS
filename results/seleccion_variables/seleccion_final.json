@@ -1,5 +1,5 @@
 {
-  "fecha": "2026-11-14 21:41:21",
+  "fecha": "2026-11-15 18:30:40",
   "metodo_elegido": "SelectKBest(f_regression)",
   "k": 10,
   "ajustado_con": "Train",
