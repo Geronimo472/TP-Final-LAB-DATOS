@@ -15,10 +15,13 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.preprocessing import PowerTransformer, StandardScaler
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import LassoCV
+from sklearn.feature_selection import f_regression
 
 warnings.filterwarnings('ignore', category=UserWarning)
+
+# Cantidad de variables que conserva SelectKBest (ANOVA F). La comparación con RFE y Lasso
+# que justifica el método y el valor de k está en notebooks/seleccion_variables.ipynb.
+K_VARIABLES = 10
 
 # ==============================================================================
 # 1. DEFINICIÓN DEL PIPELINE DE SCIKIT-LEARN (ESCALADO Y ASIMETRÍA)
@@ -379,8 +382,25 @@ def filtrar_imputar_y_dividir(df_diario: pd.DataFrame):
     return X_train_limpio, X_val_limpio, X_test_limpio, y_train, y_val, y_test
 
 
+def seleccionar_variables_kbest(X_train_scaled: pd.DataFrame, y_train: pd.Series, k: int = K_VARIABLES):
+    """Ordena las variables por el estadístico F del ANOVA (f_regression) calculado solo con Train.
+
+    Antes del test se imputan los faltantes de sensores tardíos con la mediana de Train y se acotan
+    los valores escalados a ±8 desvíos, igual que en la comparación de notebooks/seleccion_variables.ipynb.
+    Devuelve las k mejores variables (de mayor a menor F) y la tabla completa de puntajes.
+    """
+    X_sel = X_train_scaled.select_dtypes(include=[np.number]).replace([np.inf, -np.inf], np.nan)
+    X_sel = X_sel.fillna(X_sel.median()).fillna(0).clip(-8, 8)
+    puntaje_f, p_valor = f_regression(X_sel, y_train.loc[X_sel.index])
+    puntajes = (
+        pd.DataFrame({'F': np.nan_to_num(puntaje_f), 'p_valor': p_valor}, index=X_sel.columns)
+        .sort_values('F', ascending=False)
+    )
+    return puntajes.index[:k].tolist(), puntajes
+
+
 def escalar_y_seleccionar_variables(X_train_limpio, X_val_limpio, X_test_limpio, y_train):
-    """Ajusta el Pipeline de scikit-learn en Train y selecciona variables con RF U LASSO."""
+    """Ajusta el Pipeline de scikit-learn en Train y selecciona variables con SelectKBest (ANOVA F)."""
     print("[5/6] Ajustando Pipeline de scikit-learn (Yeo-Johnson + StandardScaler) y seleccionando variables...")
 
     # Ajustamos el Pipeline de scikit-learn ÚNICAMENTE con los datos de entrenamiento
@@ -389,37 +409,17 @@ def escalar_y_seleccionar_variables(X_train_limpio, X_val_limpio, X_test_limpio,
     X_val_scaled   = pipeline_escalado.transform(X_val_limpio)
     X_test_scaled  = pipeline_escalado.transform(X_test_limpio)
 
-    # Preparar copia sin NaNs de sensores tardíos para correr RF y LASSO en Train
-    X_train_clean = X_train_scaled.select_dtypes(include=[np.number]).copy()
-    X_train_clean = X_train_clean.replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
-
-    df_sel = X_train_clean.copy()
-    df_sel['target_temp'] = y_train.values
-    df_sel = df_sel.dropna()
-
-    X_tr = df_sel.drop(columns=['target_temp'])
-    y_tr = df_sel['target_temp']
-
-    # Método 1: Random Forest
-    rf = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-    rf.fit(X_tr, y_tr)
-    importancias_rf = pd.Series(rf.feature_importances_, index=X_tr.columns)
-    features_rf = importancias_rf[importancias_rf >= 0.0005].index.tolist()
-
-    # Método 2: LASSO (L1)
-    lasso = LassoCV(cv=5, random_state=42, max_iter=10000, n_jobs=-1)
-    lasso.fit(X_tr, y_tr)
-    coeficientes_lasso = pd.Series(lasso.coef_, index=X_tr.columns)
-    features_lasso = coeficientes_lasso[coeficientes_lasso != 0].index.tolist()
-
-    # Unión de ambos métodos
-    features_finales = sorted(list(set(features_rf).union(set(features_lasso))))
+    # SelectKBest con ANOVA F: elegido frente a RFE y Lasso por menor MAE en la validación
+    # cruzada temporal y mayor estabilidad (ver notebooks/seleccion_variables.ipynb)
+    features_finales, puntajes = seleccionar_variables_kbest(X_train_scaled, y_train)
 
     X_train_final = X_train_scaled[features_finales]
     X_val_final   = X_val_scaled[features_finales]
     X_test_final  = X_test_scaled[features_finales]
 
-    print(f"      -> Seleccionadas RF: {len(features_rf)} | LASSO: {len(features_lasso)} | Unión Final: {len(features_finales)}")
+    print(f"      -> Candidatas: {len(puntajes)} | Seleccionadas por SelectKBest (ANOVA F): {len(features_finales)}")
+    for posicion, variable in enumerate(features_finales, start=1):
+        print(f"         {posicion:2d}. {variable} (F = {puntajes.loc[variable, 'F']:.0f})")
     print(f"      -> Shape final X_train: {X_train_final.shape}")
     print(f"      -> Shape final X_val:   {X_val_final.shape}")
     print(f"      -> Shape final X_test:  {X_test_final.shape}")
@@ -495,7 +495,9 @@ def guardar_artefactos(
             "Imputación MCAR (SimpleImputer media) y MAR (KNNImputer) protegiendo sensores tardíos",
             "Tratamiento de outliers con Z-Modificada (MAD) y Winsorización (1%-99%) ajustado en Train",
             "Transformación Yeo-Johnson y Estandarización dentro de un Pipeline de scikit-learn ajustado en Train",
-            "Selección de características mediante la unión de Random Forest y LASSO (RF U LASSO)"
+            f"Selección de características con SelectKBest (ANOVA F, f_regression) ajustado en Train: k = {len(features_finales)}",
+            "Método elegido frente a RFE (Random Forest) y LASSO por MAE en TimeSeriesSplit, Validation y estabilidad "
+            "(notebooks/seleccion_variables.ipynb)"
         ],
         "shapes_particiones": {
             "X_train": list(X_train_limpio[features_finales].shape),
@@ -506,7 +508,8 @@ def guardar_artefactos(
             "filas": int(df_dataset_final.shape[0]),
             "columnas_totales": int(df_dataset_final.shape[1]),
             "features_seleccionadas": len(features_finales)
-        }
+        },
+        "variables_seleccionadas": list(features_finales)
     }
 
     ruta_linaje = processed_dir / "data_lineage.json"

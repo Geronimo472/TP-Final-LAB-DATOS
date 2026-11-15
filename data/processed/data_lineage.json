@@ -1,26 +1,53 @@
 {
     "proyecto": "Modelo Predictivo de Refrigeración - Planta Cerveza Tecate",
-    "fecha_generacion": "2026-11-14 17:17:26",
-    "script_origen": "notebooks/preprocesamiento.ipynb",
+    "fecha_generacion": "2026-11-14 21:41:36",
+    "script_origen": "src/preprocessing_pipeline.py",
     "transformaciones_aplicadas": [
-        "Cierres de Frío del minuto 23:59 desde la tabla unificada del EDA, con validación de cobertura y reinicio",
-        "Tratamiento de nulos e infinitos",
-        "Target de Frío alineado al día calendario D + 1",
-        "Rezagos y media móvil calculados sobre el calendario completo",
+        "Filtrado de días incompletos (<25 registros), excedidos (>25) y sin reinicio (>100 kW a las 00:00)",
+        "Agregación temporal de datos a nivel diario (cierre 23:59) con frecuencia continua ('D')",
+        "Target de Frío alineado con el cierre válido del día calendario D + 1",
+        "Auditoría y eliminación de sensores muertos en Train (>95% nulos al final)",
         "Extracción de variables de calendario (Anio, Mes, Dia_Semana, Es_Fin_De_Semana)",
-        "Creación de indicadores de eficiencia energética (Real vs Meta)",
-        "Cálculo de ratios e interacciones específicas de frío y producción",
+        "Generación de rezagos (Lag_1, Lag_7) y medias móviles de 7 días (closed='left')",
+        "Creación de indicadores de eficiencia energética (Real vs Meta) y ratios/interacciones de frío",
         "Integración de temperatura ambiente (media, max, min) de Tecate vía API Open-Meteo",
-        "Correccion de outliers",
-        "Correccion de Asimetrias mediante Yeo-Jhonson",
-        "Estandarizacion de variables",
-        "Selección de características mediante Random Forest e importancia de variables",
-        "Selección de características mediante LASSO (L1)",
-        "Conjunto final de características definido por la unión (RF U LASSO)"
+        "Filtro anti-leakage de redundancia (|r| >= 0.90) y significancia estadística (p < 0.05) en Train",
+        "División temporal cronológica: Train (70%), Validation (15%), Test (15%)",
+        "Imputación MCAR (SimpleImputer media) y MAR (KNNImputer) protegiendo sensores tardíos",
+        "Tratamiento de outliers con Z-Modificada (MAD) y Winsorización (1%-99%) ajustado en Train",
+        "Transformación Yeo-Johnson y Estandarización dentro de un Pipeline de scikit-learn ajustado en Train",
+        "Selección de características con SelectKBest (ANOVA F, f_regression) ajustado en Train: k = 10",
+        "Método elegido frente a RFE (Random Forest) y LASSO por MAE en TimeSeriesSplit, Validation y estabilidad (notebooks/seleccion_variables.ipynb)"
     ],
+    "shapes_particiones": {
+        "X_train": [
+            770,
+            10
+        ],
+        "X_val": [
+            165,
+            10
+        ],
+        "X_test": [
+            165,
+            10
+        ]
+    },
     "dimensiones_dataset_final": {
-        "filas": 808,
-        "columnas_totales": 198,
-        "features_seleccionadas": 196
-    }
+        "filas": 1100,
+        "columnas_totales": 12,
+        "features_seleccionadas": 10
+    },
+    "variables_seleccionadas": [
+        "Frio (Kw) (Consolidado EE)",
+        "Frio (Kw) (Consolidado EE)_MediaMov_7d",
+        "KW Trafo 11 (Totalizadores Energia)",
+        "Frio (Kw) (Consolidado EE)_Lag_7",
+        "Frio (Kw) (Consolidado EE)_Lag_1",
+        "ET Bodega/Hl (Consolidado KPI)_MediaMov_7d",
+        "KW Trafo 11 (Totalizadores Energia)_MediaMov_7d",
+        "Agua Planta (Hl) (Consolidado Agua)",
+        "KW Cond 5. 6 y 9 (Totalizadores Energia)",
+        "FC Centec II (Totalizadores Agua)_MediaMov_7d"
+    ]
 }
