@@ -120,7 +120,8 @@ TP-Final-LAB-DATOS/
 ├── src/
 │   ├── preprocessing_pipeline.py
 │   ├── train_model.py
-│   └── evaluate_model.py
+│   ├── evaluate_model.py
+│   └── predict.py
 ├── models/
 ├── results/
 ├── .gitignore
@@ -144,6 +145,8 @@ python src/preprocessing_pipeline.py
 El notebook `notebooks/preprocesamiento.ipynb` documenta y permite inspeccionar los mismos criterios de preparación.
 
 El pipeline limpia los datos, genera características, realiza la división temporal de los conjuntos y exporta `data/processed/dataset_final.csv`. La ruta de entrada habitual es `data/dataset_unificado_inicial.csv`. Puede indicarse otra con `--data RUTA`.
+
+El comando también genera `data/processed/preprocesador.joblib` con los imputadores, los límites de atípicos y las variables seleccionadas en Train. Para guardar un modelo apto para predecir desde Excel, generá el estado y el CSV juntos con el script.
 
 ### Etapa 2 — Optimización con Optuna
 
@@ -184,7 +187,7 @@ Una vez seleccionado el modelo definitivo:
 python src/train_model.py --finalizar
 ```
 
-El modelo se reentrena con Train + Validation y se guarda versionado junto con su registro.
+El modelo se reentrena con Train + Validation y se guarda versionado junto con su registro. El archivo del modelo incluye el preprocesamiento ajustado para que se pueda ejecutar `predict.py` en otro equipo.
 
 ### Etapa 5 — Evaluación final
 
@@ -195,6 +198,18 @@ python src/evaluate_model.py --test
 ```
 
 El conjunto de Test se reserva para la evaluación final y no debe utilizarse para seleccionar modelos o hiperparámetros.
+
+### Etapa 6 — Predicción sobre un Excel nuevo
+
+Con el modelo y `models/model_registry.json` generados, ejecutá desde la raíz:
+
+```powershell
+python src/predict.py 'ruta/al/archivo.xlsx'
+```
+
+El script usa la versión semántica más alta del registro. Para elegir otra, agregá `--version v1.0.0`. Escribe `results/predicciones.csv` con `fecha` (día D de entrada) y `prediccion_frio_kw` (pronóstico para D+1), una fila por día válido. `--salida` permite elegir otra ruta.
+
+El Excel puede traer columnas y hojas adicionales. Las hojas necesarias se leen por nombre y deben tener `DIA`, `HORA` y las mediciones requeridas por el modelo. Incorpora el historial de los 7 días anteriores si está disponible para calcular los rezagos y las medias móviles desde el primer día. Los faltantes se procesan con los valores aprendidos en entrenamiento.
 
 ## 9. Reproducibilidad
 

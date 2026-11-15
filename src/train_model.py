@@ -243,11 +243,22 @@ def guardar_modelo_final(nombre, parametros, X_train, y_train, X_val, y_val,
             f"Ya existe {ruta_modelo}. Elegí una versión nueva, por ejemplo v1.0.1."
         )
 
+    ruta_preprocesador = ruta_datos.with_name('preprocesador.joblib')
+    if not ruta_preprocesador.is_file():
+        raise FileNotFoundError(
+            f"Falta {ruta_preprocesador}. Ejecutá src/preprocessing_pipeline.py antes de finalizar."
+        )
+    huella_dataset = hash_archivo(ruta_datos)
+    preprocesador = joblib.load(ruta_preprocesador)
+    if (preprocesador['dataset_sha256'] != huella_dataset
+            or preprocesador['variables'] != list(X_train.columns)):
+        raise ValueError("El preprocesador no corresponde al CSV de entrenamiento. Regenerá ambos juntos.")
+
     X_total = pd.concat([X_train, X_val]).sort_index()
     y_total = pd.concat([y_train, y_val]).sort_index()
     modelo = crear_modelo(nombre, parametros)
     modelo.fit(X_total, y_total)
-    joblib.dump(modelo, ruta_modelo)
+    modelo.preprocesador_datos_ = preprocesador
 
     try:
         git_commit = subprocess.check_output(
@@ -271,13 +282,14 @@ def guardar_modelo_final(nombre, parametros, X_train, y_train, X_val, y_val,
         "path": f"models/{ruta_modelo.name}",
         "hiperparametros": parametros,
         "metricas_validacion": {k: float(v) for k, v in metricas_validacion.items()},
-        "dataset_sha256": hash_archivo(ruta_datos),
+        "dataset_sha256": huella_dataset,
         "columnas_entrada": list(X_total.columns),
         "target": TARGET,
         "git_commit": git_commit,
         "entrenado_utc": datetime.now(timezone.utc).isoformat(),
     }
     catalogo["latest"] = version
+    joblib.dump(modelo, ruta_modelo)
     with registro.open("w", encoding="utf-8") as archivo:
         json.dump(catalogo, archivo, indent=2, ensure_ascii=False)
 
