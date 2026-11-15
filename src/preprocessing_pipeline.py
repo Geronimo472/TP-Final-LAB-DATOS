@@ -26,6 +26,14 @@ K_VARIABLES = 10
 COLUMNA_FRIO = 'Frio (Kw) (Consolidado EE)'
 TARGET = 'Target_Frio_Dia_Siguiente'
 
+# Cierres sin escalar de las primeras 270 fechas de Train (2020-07-01 a 2021-04-18),
+# el tramo de ajuste del primer fold de seleccion_variables.ipynb.
+Q1_FRIO_TRAIN, Q3_FRIO_TRAIN = 17_859.5, 28_371.25
+FACTOR_IQR_FRIO = 5
+RANGO_IQR_FRIO = Q3_FRIO_TRAIN - Q1_FRIO_TRAIN
+LIMITE_INFERIOR_FRIO = max(0.0, Q1_FRIO_TRAIN - FACTOR_IQR_FRIO * RANGO_IQR_FRIO)
+LIMITE_SUPERIOR_FRIO = Q3_FRIO_TRAIN + FACTOR_IQR_FRIO * RANGO_IQR_FRIO
+
 # ==============================================================================
 # 1. DEFINICIÓN DEL PIPELINE DE SCIKIT-LEARN (ESCALADO Y ASIMETRÍA)
 # ==============================================================================
@@ -109,9 +117,15 @@ def preparar_cierres(df_final: pd.DataFrame, *, con_objetivo=True) -> pd.DataFra
     df_diario = df_diario.replace(
         ['#VALUE!', '#DIV/0!', '#REF!', '#N/A', '#NAME?', '#NULL!', '#NUM!', ''],
         np.nan
-    )
-    for col in df_diario.columns:
-        df_diario[col] = pd.to_numeric(df_diario[col], errors='coerce')
+    ).apply(pd.to_numeric, errors='coerce')
+
+    # Validar el cierre antes de usarlo como variable, rezago o valor real de D+1.
+    frio = df_diario[COLUMNA_FRIO]
+    en_rango = frio.between(LIMITE_INFERIOR_FRIO, LIMITE_SUPERIOR_FRIO)
+    fuera_de_rango = frio.notna() & ~en_rango
+    if fuera_de_rango.any():
+        print(f"Se marcaron {fuera_de_rango.sum()} cierres de Frío fuera del rango de Train como faltantes.")
+    df_diario[COLUMNA_FRIO] = frio.where(en_rango)
 
     if con_objetivo:
         dia_siguiente = df_diario.index + pd.Timedelta(days=1)
@@ -596,6 +610,8 @@ def guardar_artefactos(
         "transformaciones_aplicadas": [
             "Filtrado de días incompletos (<25 registros), excedidos (>25) y sin reinicio (>100 kW a las 00:00)",
             "Agregación temporal de datos a nivel diario (cierre 23:59) con frecuencia continua ('D')",
+            f"Cierres de Frío fuera de [{LIMITE_INFERIOR_FRIO:g}, {LIMITE_SUPERIOR_FRIO:g}] kW tratados como faltantes "
+            f"(cuartiles del primer tramo de ajuste temporal de Train, con margen de {FACTOR_IQR_FRIO} IQR y piso en cero)",
             "Target de Frío alineado con el cierre válido del día calendario D + 1",
             "Auditoría y eliminación de sensores muertos en Train (>95% nulos al final)",
             "Extracción de variables de calendario (Anio, Mes, Dia_Semana, Es_Fin_De_Semana)",
