@@ -21,13 +21,14 @@ from sklearn.feature_selection import f_regression
 warnings.filterwarnings('ignore', category=UserWarning)
 
 # Cantidad de variables que conserva SelectKBest (ANOVA F). La comparación con RFE y Lasso
-# que justifica el método y el valor de k está en notebooks/seleccion_variables.ipynb.
+# que justifica el método y el valor de k está en notebooks/preprocesamiento.ipynb, sección Selección de Variables.
 K_VARIABLES = 10
 COLUMNA_FRIO = 'Frio (Kw) (Consolidado EE)'
 TARGET = 'Target_Frio_Dia_Siguiente'
 
 # Cierres sin escalar de las primeras 270 fechas de Train (2020-07-01 a 2021-04-18),
-# el tramo de ajuste del primer fold de seleccion_variables.ipynb.
+# el tramo de ajuste del primer fold de la comparación de métodos
+# (notebooks/preprocesamiento.ipynb, sección Selección de Variables).
 Q1_FRIO_TRAIN, Q3_FRIO_TRAIN = 17_859.5, 28_371.25
 FACTOR_IQR_FRIO = 5
 RANGO_IQR_FRIO = Q3_FRIO_TRAIN - Q1_FRIO_TRAIN
@@ -517,7 +518,7 @@ def seleccionar_variables_kbest(X_train_scaled: pd.DataFrame, y_train: pd.Series
     """Ordena las variables por el estadístico F del ANOVA (f_regression) calculado solo con Train.
 
     Antes del test se imputan los faltantes de sensores tardíos con la mediana de Train y se acotan
-    los valores escalados a ±8 desvíos, igual que en la comparación de notebooks/seleccion_variables.ipynb.
+    los valores escalados a ±8 desvíos, igual que en la comparación de notebooks/preprocesamiento.ipynb, sección Selección de Variables.
     Devuelve las k mejores variables (de mayor a menor F) y la tabla completa de puntajes.
     """
     X_sel = X_train_scaled.select_dtypes(include=[np.number]).replace([np.inf, -np.inf], np.nan)
@@ -541,7 +542,7 @@ def escalar_y_seleccionar_variables(X_train_limpio, X_val_limpio, X_test_limpio,
     X_test_scaled  = pipeline_escalado.transform(X_test_limpio)
 
     # SelectKBest con ANOVA F: elegido frente a RFE y Lasso por menor MAE en la validación
-    # cruzada temporal y mayor estabilidad (ver notebooks/seleccion_variables.ipynb)
+    # cruzada temporal y su coherencia con el EDA (ver notebooks/preprocesamiento.ipynb, sección Selección de Variables)
     features_finales, puntajes = seleccionar_variables_kbest(X_train_scaled, y_train)
 
     X_train_final = X_train_scaled[features_finales]
@@ -641,8 +642,8 @@ def guardar_artefactos(
             "Tratamiento de outliers con Z-Modificada (MAD) y Winsorización (1%-99%) ajustado en Train",
             "Transformación Yeo-Johnson y Estandarización dentro de un Pipeline de scikit-learn ajustado en Train",
             f"Selección de características con SelectKBest (ANOVA F, f_regression) ajustado en Train: k = {len(features_finales)}",
-            "Método elegido frente a RFE (Random Forest) y LASSO por MAE en TimeSeriesSplit, Validation y estabilidad "
-            "(notebooks/seleccion_variables.ipynb)"
+            "Método elegido frente a RFE (Random Forest) y LASSO por MAE en TimeSeriesSplit, Validation y coherencia con el EDA "
+            "(notebooks/preprocesamiento.ipynb, sección Selección de Variables)"
         ],
         "shapes_particiones": {
             "X_train": list(X_train_limpio[features_finales].shape),

@@ -17,7 +17,7 @@
         "Tratamiento de outliers con Z-Modificada (MAD) y Winsorización (1%-99%) ajustado en Train",
         "Transformación Yeo-Johnson y Estandarización dentro de un Pipeline de scikit-learn ajustado en Train",
         "Selección de características con SelectKBest (ANOVA F, f_regression) ajustado en Train: k = 10",
-        "Método elegido frente a RFE (Random Forest) y LASSO por MAE en TimeSeriesSplit, Validation y estabilidad (notebooks/seleccion_variables.ipynb)"
+        "Método elegido frente a RFE (Random Forest) y LASSO por MAE en TimeSeriesSplit, Validation y coherencia con el EDA (notebooks/preprocesamiento.ipynb, sección Selección de Variables)"
     ],
     "shapes_particiones": {
         "X_train": [
