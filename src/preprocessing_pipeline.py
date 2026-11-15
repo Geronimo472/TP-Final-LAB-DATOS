@@ -22,6 +22,8 @@ warnings.filterwarnings('ignore', category=UserWarning)
 # Cantidad de variables que conserva SelectKBest (ANOVA F). La comparación con RFE y Lasso
 # que justifica el método y el valor de k está en notebooks/seleccion_variables.ipynb.
 K_VARIABLES = 10
+COLUMNA_FRIO = 'Frio (Kw) (Consolidado EE)'
+TARGET = 'Target_Frio_Dia_Siguiente'
 
 # ==============================================================================
 # 1. DEFINICIÓN DEL PIPELINE DE SCIKIT-LEARN (ESCALADO Y ASIMETRÍA)
@@ -99,10 +101,9 @@ def cargar_y_limpiar_registros(ruta_csv_entrada: Path) -> pd.DataFrame:
     df_diario = df_diario.asfreq('D')
 
     # Crear variable objetivo usando exactamente el día calendario siguiente.
-    col_objetivo = 'Frio (Kw) (Consolidado EE)'
     dia_siguiente = df_diario.index + pd.Timedelta(days=1)
-    df_diario['Target_Frio_Dia_Siguiente'] = (
-        df_diario[col_objetivo].reindex(dia_siguiente).to_numpy()
+    df_diario[TARGET] = (
+        df_diario[COLUMNA_FRIO].reindex(dia_siguiente).to_numpy()
     )
 
     # Reemplazar errores de Excel por NaN y asegurar tipo numérico
@@ -116,33 +117,30 @@ def cargar_y_limpiar_registros(ruta_csv_entrada: Path) -> pd.DataFrame:
     return df_diario
 
 
-def auditar_sensores_muertos(df_diario: pd.DataFrame) -> pd.DataFrame:
-    """Detecta y elimina sensores muertos evaluando exclusivamente el 70% inicial (Train)."""
+def fechas_modelables(df_diario: pd.DataFrame) -> pd.DatetimeIndex:
+    """Devuelve las fechas con frío observado hoy y al día siguiente."""
+    return df_diario.dropna(subset=[COLUMNA_FRIO, TARGET]).index
+
+
+def auditar_sensores_muertos(df_diario: pd.DataFrame, *, hasta=None) -> pd.DataFrame:
+    """Elimina sensores con más de 95% de nulos en el tramo final del ajuste."""
     print("[2/6] Auditando sensores muertos en Train...")
-    df_temp = df_diario.copy()
-    dias_validos_mask = df_temp['Frio (Kw) (Consolidado EE)'].notna()
-    df_temp_validos = df_temp[dias_validos_mask]
+    dias_validos = df_diario.loc[df_diario[COLUMNA_FRIO].notna()]
+    if hasta is None:
+        df_train_audit = dias_validos.iloc[:int(len(dias_validos) * 0.70)]
+    else:
+        df_train_audit = dias_validos.loc[:hasta]
 
-    n_train_validos = int(len(df_temp_validos) * 0.70)
-    df_train_audit = df_temp_validos.iloc[:n_train_validos]
-
-    n = len(df_train_audit)
-    corte_70 = int(n * 0.70)
+    corte_70 = int(len(df_train_audit) * 0.70)
     nulos_fin = df_train_audit.iloc[corte_70:].isnull().mean()
-
-    mask_muertos = nulos_fin > 0.95
-    vector_sensores_muertos = df_train_audit.columns[mask_muertos].tolist()
-
-    df_diario = df_temp.drop(columns=vector_sensores_muertos)
-    print(f"      -> Sensores muertos eliminados: {len(vector_sensores_muertos)}")
-    return df_diario
+    sensores_muertos = nulos_fin.drop(labels=[COLUMNA_FRIO, TARGET]).loc[lambda s: s > 0.95].index
+    print(f"      -> Sensores muertos eliminados: {len(sensores_muertos)}")
+    return df_diario.drop(columns=sensores_muertos)
 
 
-def crear_features(df_diario: pd.DataFrame) -> pd.DataFrame:
+def crear_features(df_diario: pd.DataFrame, *, clima=None) -> pd.DataFrame:
     """Genera variables de calendario, lags, medias móviles, ratios, interacciones y clima."""
     print("[3/6] Ejecutando Feature Engineering...")
-    target = 'Target_Frio_Dia_Siguiente'
-    col_objetivo = 'Frio (Kw) (Consolidado EE)'
 
     if not isinstance(df_diario.index, pd.DatetimeIndex):
         df_diario.index = pd.to_datetime(df_diario.index)
@@ -155,7 +153,7 @@ def crear_features(df_diario: pd.DataFrame) -> pd.DataFrame:
 
     # Lags y Medias Móviles
     cols_para_features = df_diario.select_dtypes(include=[np.number]).columns.drop(
-        [target, 'Anio', 'Mes', 'Dia_Semana', 'Es_Fin_De_Semana'], errors='ignore'
+        [TARGET, 'Anio', 'Mes', 'Dia_Semana', 'Es_Fin_De_Semana'], errors='ignore'
     )
 
     nuevas_cols_lag = {}
@@ -167,7 +165,7 @@ def crear_features(df_diario: pd.DataFrame) -> pd.DataFrame:
         )
 
     df_diario = pd.concat([df_diario, pd.DataFrame(nuevas_cols_lag, index=df_diario.index)], axis=1)
-    df_diario = df_diario.dropna(subset=[col_objetivo, target]).copy()
+    df_diario = df_diario.loc[fechas_modelables(df_diario)].copy()
 
     # Eficiencia energética (Real vs Meta)
     epsilon = 1e-5
@@ -214,10 +212,19 @@ def crear_features(df_diario: pd.DataFrame) -> pd.DataFrame:
                 df_diario['Cocimientos Diarios (Consolidado Produccion)']
             )
 
-    # Integración climática de Tecate vía API Open-Meteo
+    if clima is None:
+        clima = cargar_clima(df_diario.index)
+    if not clima.empty:
+        df_diario = df_diario.join(clima, how='left')
+        df_diario[clima.columns] = df_diario[clima.columns].ffill()
+    return df_diario
+
+
+def cargar_clima(fechas: pd.DatetimeIndex) -> pd.DataFrame:
+    """Obtiene el clima de Tecate para el intervalo de fechas solicitado."""
     lat, lon = 32.5714, -116.6275
-    fecha_inicio = df_diario.index.min().strftime('%Y-%m-%d')
-    fecha_fin = df_diario.index.max().strftime('%Y-%m-%d')
+    fecha_inicio = fechas.min().strftime('%Y-%m-%d')
+    fecha_fin = fechas.max().strftime('%Y-%m-%d')
     url = (
         f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}"
         f"&start_date={fecha_inicio}&end_date={fecha_fin}"
@@ -228,27 +235,25 @@ def crear_features(df_diario: pd.DataFrame) -> pd.DataFrame:
         response.raise_for_status()
         data = response.json()
         if "daily" in data:
-            df_clima = pd.DataFrame({
+            return pd.DataFrame({
                 'Fecha': pd.to_datetime(data['daily']['time']),
                 'Temp_Media_Tecate': data['daily']['temperature_2m_mean'],
                 'Temp_Max_Tecate': data['daily']['temperature_2m_max'],
                 'Temp_Min_Tecate': data['daily']['temperature_2m_min']
             }).set_index('Fecha')
-            df_diario = df_diario.join(df_clima, how='left')
-            for col_c in ['Temp_Media_Tecate', 'Temp_Max_Tecate', 'Temp_Min_Tecate']:
-                df_diario[col_c] = df_diario[col_c].ffill()
     except Exception as exc:
         raise RuntimeError(
             "No se pudieron obtener los datos de Open-Meteo. "
             "El pipeline se detiene para no generar un dataset diferente sin avisar."
         ) from exc
 
-    return df_diario
+    return pd.DataFrame()
 
 
-def aplicar_limpieza_outliers(df_train, df_val, df_test, umbral_z=3.5, lower_q=0.01, upper_q=0.99):
-    """Acota outliers mediante Z-Modificada (MAD) y Winsorización ajustados SOLO en Train."""
-    tr, va, te = df_train.copy(), df_val.copy(), df_test.copy()
+def aplicar_limpieza_outliers(df_train, *otros, umbral_z=3.5, lower_q=0.01, upper_q=0.99):
+    """Acota outliers con límites aprendidos en las filas de ajuste."""
+    tr = df_train.copy()
+    evaluaciones = [df.copy() for df in otros]
     cols_numericas = [
         col for col in tr.select_dtypes(include=[np.number]).columns
         if col != 'Target_Frio_Dia_Siguiente'
@@ -261,27 +266,29 @@ def aplicar_limpieza_outliers(df_train, df_val, df_test, umbral_z=3.5, lower_q=0
             lim_inf_z = mediana - (umbral_z * mad / 0.6745)
             lim_sup_z = mediana + (umbral_z * mad / 0.6745)
             tr[col] = tr[col].clip(lower=lim_inf_z, upper=lim_sup_z)
-            va[col] = va[col].clip(lower=lim_inf_z, upper=lim_sup_z)
-            te[col] = te[col].clip(lower=lim_inf_z, upper=lim_sup_z)
+            for df in evaluaciones:
+                df[col] = df[col].clip(lower=lim_inf_z, upper=lim_sup_z)
 
         p_inf = tr[col].quantile(lower_q)
         p_sup = tr[col].quantile(upper_q)
         tr[col] = tr[col].clip(lower=p_inf, upper=p_sup)
-        va[col] = va[col].clip(lower=p_inf, upper=p_sup)
-        te[col] = te[col].clip(lower=p_inf, upper=p_sup)
+        for df in evaluaciones:
+            df[col] = df[col].clip(lower=p_inf, upper=p_sup)
 
-    return tr, va, te
+    return tr, *evaluaciones
 
 
-def filtrar_imputar_y_dividir(df_diario: pd.DataFrame):
-    """Filtra redundancia/significancia en Train, divide 70/15/15, imputa nulos y limpia outliers."""
-    print("[4/6] Filtrando redundancia, dividiendo (70/15/15), imputando y tratando outliers...")
-    target = 'Target_Frio_Dia_Siguiente'
-    n_train = int(len(df_diario) * 0.70)
-    df_train_only = df_diario.iloc[:n_train]
+def dividir_temporalmente(datos):
+    """Divide datos ordenados cronológicamente en Train, Validation y Test (70/15/15)."""
+    desarrollo, test = train_test_split(datos, test_size=0.15, shuffle=False)
+    train, val = train_test_split(desarrollo, test_size=0.15 / 0.85, shuffle=False)
+    return train, val, test
 
+
+def filtrar_imputar_y_limpiar(df_train, *evaluaciones):
+    """Aprende filtros, imputaciones y límites en df_train y los aplica a cada partición."""
     # 1. Filtro de Redundancia (|r| >= 0.90) en Train
-    X_features_train = df_train_only.drop(columns=[target]).select_dtypes(include=[np.number])
+    X_features_train = df_train.drop(columns=[TARGET]).select_dtypes(include=[np.number])
     matriz_corr = X_features_train.corr().abs()
     upper_tri = matriz_corr.where(np.triu(np.ones(matriz_corr.shape), k=1).astype(bool))
 
@@ -290,96 +297,70 @@ def filtrar_imputar_y_dividir(df_diario: pd.DataFrame):
         correlacionadas = upper_tri.index[upper_tri[col] >= 0.90].tolist()
         if correlacionadas:
             grupo = correlacionadas + [col]
-            mejor_var = df_train_only[grupo].corrwith(df_train_only[target]).abs().idxmax()
+            mejor_var = df_train[grupo].corrwith(df_train[TARGET]).abs().idxmax()
             for c in grupo:
                 if c != mejor_var:
                     cols_a_eliminar_red.add(c)
 
-    df_sin_redundancia = df_diario.drop(columns=list(cols_a_eliminar_red))
-
     # 2. Filtro de P-Value (p < 0.05) en Train
-    df_train_sin_red = df_sin_redundancia.iloc[:n_train]
-    X_final_candidatas = df_train_sin_red.drop(columns=[target]).select_dtypes(include=[np.number])
+    df_train_sin_red = df_train.drop(columns=list(cols_a_eliminar_red))
+    X_final_candidatas = df_train_sin_red.drop(columns=[TARGET]).select_dtypes(include=[np.number])
     variables_significativas = []
 
     for col in X_final_candidatas.columns:
-        datos_validos = df_train_sin_red[[col, target]].dropna()
+        datos_validos = df_train_sin_red[[col, TARGET]].dropna()
         if len(datos_validos) > 2 and datos_validos[col].nunique() > 1:
-            _, p_value = pearsonr(datos_validos[col], datos_validos[target])
+            _, p_value = pearsonr(datos_validos[col], datos_validos[TARGET])
             if p_value < 0.05:
                 variables_significativas.append(col)
 
-    df_diario = df_sin_redundancia[variables_significativas + [target]].copy()
-
-    # 3. Eliminar columnas vacías, 'Unnamed' y patrones administrativos ('Meta', 'Id ', etc.)
-    df_diario = df_diario.dropna(axis=1, how='all')
-    df_diario = df_diario.loc[:, ~df_diario.columns.str.contains('Unnamed', case=False, na=False)]
-
+    # 3. Eliminar columnas auxiliares y patrones administrativos.
     patrones_a_eliminar = ['Meta', 'Id ', 'Auxiliar', 'Ultimo Dato']
-    columnas_a_conservar = [
-        col for col in df_diario.columns
-        if not any(p.lower() in str(col).lower() for p in patrones_a_eliminar) or col in ['DIA', 'HORA']
+    columnas = [
+        col for col in variables_significativas
+        if 'unnamed' not in col.lower()
+        and (col in ['DIA', 'HORA'] or not any(p.lower() in col.lower() for p in patrones_a_eliminar))
     ]
-    df_diario = df_diario[columnas_a_conservar]
+    X_train = df_train[columnas].copy()
 
-    # 4. Identificar sensores incorporados tarde en Train
-    df_train_check = df_diario.iloc[:n_train]
-    inicio_corte = int(n_train * 0.30)
-    fin_corte = int(n_train * 0.70)
-    sensores_protegidos = []
+    # 4. Proteger los sensores incorporados tarde durante el tramo de ajuste.
+    inicio_corte = int(len(X_train) * 0.30)
+    fin_corte = int(len(X_train) * 0.70)
+    sensores_protegidos = (
+        (X_train.iloc[:inicio_corte].isna().mean() > 0.50)
+        & (X_train.iloc[fin_corte:].isna().mean() < 0.20)
+    )
 
-    for col in df_train_check.columns:
-        if col == target:
-            continue
-        serie = df_train_check[col]
-        if serie.iloc[:inicio_corte].isnull().mean() > 0.50 and serie.iloc[fin_corte:].isnull().mean() < 0.20:
-            sensores_protegidos.append(col)
+    # 5. Elegir la imputación a partir del porcentaje de nulos en Train.
+    porcentaje_nulos = X_train.loc[:, ~sensores_protegidos].isna().mean() * 100
+    cols_media = porcentaje_nulos[(porcentaje_nulos > 0) & (porcentaje_nulos < 1)].index
+    cols_knn = porcentaje_nulos[porcentaje_nulos.between(1, 45)].index
+    cols_descartadas = porcentaje_nulos[porcentaje_nulos > 45].index
+    columnas_finales = X_train.columns.drop(cols_descartadas)
+    # Mantener el orden de salida del pipeline original.
+    protegidas = sensores_protegidos[sensores_protegidos].index
+    columnas_finales = columnas_finales.drop(protegidas).append(protegidas)
+    X_train = X_train[columnas_finales].copy()
+    otros = [df[columnas_finales].copy() for df in evaluaciones]
 
-    # 5. División Temporal (Train 70% / Val 15% / Test 15%)
-    X = df_diario.drop(columns=[target])
-    y = df_diario[target]
+    for cols, imputador in (
+        (cols_media, SimpleImputer(strategy='mean')),
+        (cols_knn, KNNImputer(n_neighbors=5)),
+    ):
+        if len(cols):
+            X_train[cols] = imputador.fit_transform(X_train[cols])
+            for df in otros:
+                df[cols] = imputador.transform(df[cols])
 
-    X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=0.15, shuffle=False)
-    val_prop = 0.15 / 0.85
-    X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=val_prop, shuffle=False)
+    return aplicar_limpieza_outliers(X_train, *otros)
 
-    # 6. Imputación MCAR (<1%) y MAR (1%-45%) protegiendo sensores nuevos
-    cols_normales = [col for col in X_train.columns if col not in sensores_protegidos]
-    X_train_norm, X_train_prot = X_train[cols_normales].copy(), X_train[sensores_protegidos].copy()
-    X_val_norm, X_val_prot     = X_val[cols_normales].copy(), X_val[sensores_protegidos].copy()
-    X_test_norm, X_test_prot   = X_test[cols_normales].copy(), X_test[sensores_protegidos].copy()
 
-    porcentaje_nulos = (X_train_norm.isnull().sum() / len(X_train_norm)) * 100
-    cols_mcar = porcentaje_nulos[(porcentaje_nulos > 0) & (porcentaje_nulos < 1.0)].index.tolist()
-    cols_mar  = porcentaje_nulos[(porcentaje_nulos >= 1.0) & (porcentaje_nulos <= 45.0)].index.tolist()
-    cols_mnar = porcentaje_nulos[porcentaje_nulos > 45.0].index.tolist()
-
-    X_train_norm = X_train_norm.drop(columns=cols_mnar, errors='ignore')
-    X_val_norm   = X_val_norm.drop(columns=cols_mnar, errors='ignore')
-    X_test_norm  = X_test_norm.drop(columns=cols_mnar, errors='ignore')
-
-    cols_mcar_activas = [c for c in cols_mcar if c in X_train_norm.columns]
-    if len(cols_mcar_activas) > 0:
-        imputer_mcar = SimpleImputer(strategy='mean')
-        X_train_norm[cols_mcar_activas] = imputer_mcar.fit_transform(X_train_norm[cols_mcar_activas])
-        X_val_norm[cols_mcar_activas]   = imputer_mcar.transform(X_val_norm[cols_mcar_activas])
-        X_test_norm[cols_mcar_activas]  = imputer_mcar.transform(X_test_norm[cols_mcar_activas])
-
-    cols_mar_activas = [c for c in cols_mar if c in X_train_norm.columns]
-    if len(cols_mar_activas) > 0:
-        imputer_mar = KNNImputer(n_neighbors=5)
-        X_train_norm[cols_mar_activas] = imputer_mar.fit_transform(X_train_norm[cols_mar_activas])
-        X_val_norm[cols_mar_activas]   = imputer_mar.transform(X_val_norm[cols_mar_activas])
-        X_test_norm[cols_mar_activas]  = imputer_mar.transform(X_test_norm[cols_mar_activas])
-
-    X_train = pd.concat([X_train_norm, X_train_prot], axis=1)
-    X_val   = pd.concat([X_val_norm, X_val_prot], axis=1)
-    X_test  = pd.concat([X_test_norm, X_test_prot], axis=1)
-
-    # 7. Limpieza de Outliers (Z-Modificada + Winsorización)
-    X_train_limpio, X_val_limpio, X_test_limpio = aplicar_limpieza_outliers(X_train, X_val, X_test)
-
-    return X_train_limpio, X_val_limpio, X_test_limpio, y_train, y_val, y_test
+def filtrar_imputar_y_dividir(df_diario: pd.DataFrame):
+    """Divide el dataset y ajusta la limpieza con Train completo."""
+    print("[4/6] Filtrando redundancia, dividiendo (70/15/15), imputando y tratando outliers...")
+    train, val, test = dividir_temporalmente(df_diario)
+    X_train, X_val, X_test = filtrar_imputar_y_limpiar(train, val, test)
+    return X_train, X_val, X_test, train[TARGET], val[TARGET], test[TARGET]
 
 
 def seleccionar_variables_kbest(X_train_scaled: pd.DataFrame, y_train: pd.Series, k: int = K_VARIABLES):
