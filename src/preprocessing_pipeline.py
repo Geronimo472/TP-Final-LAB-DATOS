@@ -86,7 +86,7 @@ def cargar_y_limpiar_registros(ruta_csv_entrada: Path) -> pd.DataFrame:
     return preparar_cierres(df_final)
 
 
-def preparar_cierres(df_final: pd.DataFrame, *, con_objetivo=True) -> pd.DataFrame:
+def preparar_cierres(df_final: pd.DataFrame, *, con_objetivo=True, umbral_reinicio=None) -> pd.DataFrame:
     """Aplica las mismas reglas horarias a datos históricos y a un Excel nuevo."""
     # Filtrar días que no tengan exactamente 25 registros
     conteo_horas = df_final.groupby('DIA').size()
@@ -96,12 +96,19 @@ def preparar_cierres(df_final: pd.DataFrame, *, con_objetivo=True) -> pd.DataFra
     df_final = df_final[~df_final['DIA'].isin(dias_incompletos)].copy()
     df_final = df_final[~df_final['DIA'].isin(dias_imposibles)].copy()
 
-    # Filtrar días sin reinicio en el totalizador de frío a las 00:00:00 (umbral = 100 kW)
+    # Filtrar días sin reinicio en el totalizador de frío a las 00:00:00
     df_final['HORA'] = df_final['HORA'].astype(str).str.strip()
     df_medianoche = df_final[df_final['HORA'].str.startswith('00:00:00')].copy()
     frio_medianoche = pd.to_numeric(df_medianoche[COLUMNA_FRIO], errors='coerce')
 
-    umbral_reinicio = 100
+    if umbral_reinicio is None:
+        df_cierre = df_final[df_final['HORA'].str.startswith('23:59:00')].copy()
+        s_cierre = pd.to_numeric(df_cierre[COLUMNA_FRIO], errors='coerce')
+        fechas_ordenadas = np.sort(df_final['DIA'].unique())
+        fecha_corte_train = fechas_ordenadas[int(len(fechas_ordenadas) * 0.70)]
+        mediana_cierre_train = s_cierre[df_cierre['DIA'] <= fecha_corte_train].median()
+        umbral_reinicio = float(0.20 * mediana_cierre_train)
+
     dias_sin_reinicio = df_medianoche.loc[frio_medianoche > umbral_reinicio, 'DIA'].unique()
     df_final_limpio = df_final[~df_final['DIA'].isin(dias_sin_reinicio)].copy()
 
@@ -130,6 +137,7 @@ def preparar_cierres(df_final: pd.DataFrame, *, con_objetivo=True) -> pd.DataFra
     if con_objetivo:
         dia_siguiente = df_diario.index + pd.Timedelta(days=1)
         df_diario[TARGET] = df_diario[COLUMNA_FRIO].reindex(dia_siguiente).to_numpy()
+    df_diario.attrs['umbral_reinicio'] = umbral_reinicio
     return df_diario
 
 
@@ -141,6 +149,7 @@ def fechas_modelables(df_diario: pd.DataFrame) -> pd.DatetimeIndex:
 def auditar_sensores_muertos(df_diario: pd.DataFrame, *, hasta=None) -> pd.DataFrame:
     """Elimina sensores con más de 95% de nulos en el tramo final del ajuste."""
     print("[2/6] Auditando sensores muertos en Train...")
+    umbral_reinicio = df_diario.attrs.get('umbral_reinicio')
     dias_validos = df_diario.loc[df_diario[COLUMNA_FRIO].notna()]
     if hasta is None:
         df_train_audit = dias_validos.iloc[:int(len(dias_validos) * 0.70)]
@@ -151,7 +160,9 @@ def auditar_sensores_muertos(df_diario: pd.DataFrame, *, hasta=None) -> pd.DataF
     nulos_fin = df_train_audit.iloc[corte_70:].isnull().mean()
     sensores_muertos = nulos_fin.drop(labels=[COLUMNA_FRIO, TARGET]).loc[lambda s: s > 0.95].index
     print(f"      -> Sensores muertos eliminados: {len(sensores_muertos)}")
-    return df_diario.drop(columns=sensores_muertos)
+    resultado = df_diario.drop(columns=sensores_muertos)
+    resultado.attrs['umbral_reinicio'] = umbral_reinicio
+    return resultado
 
 
 PARES_EFICIENCIA = [
@@ -189,6 +200,7 @@ SUFIJOS_TEMPORALES = ('_Lag_1', '_Lag_7', '_MediaMov_7d')
 def crear_features(df_diario: pd.DataFrame, *, clima=None, con_objetivo=True) -> pd.DataFrame:
     """Genera variables de calendario, lags, medias móviles, ratios, interacciones y clima."""
     print("[3/6] Ejecutando Feature Engineering...")
+    umbral_reinicio = df_diario.attrs.get('umbral_reinicio')
 
     df_diario = df_diario.copy()
     if not isinstance(df_diario.index, pd.DatetimeIndex):
@@ -233,6 +245,7 @@ def crear_features(df_diario: pd.DataFrame, *, clima=None, con_objetivo=True) ->
     if not clima.empty:
         df_diario = df_diario.join(clima, how='left')
         df_diario[clima.columns] = df_diario[clima.columns].ffill()
+    df_diario.attrs['umbral_reinicio'] = umbral_reinicio
     return df_diario
 
 
@@ -365,6 +378,7 @@ def ajustar_limpieza(df_train):
         'columnas': columnas_finales.tolist(),
         'imputadores': imputadores,
         'limites': limites,
+        'umbral_reinicio': df_train.attrs.get('umbral_reinicio'),
     }
     return aplicar_limites_outliers(X_train, limites), estado
 
@@ -468,9 +482,10 @@ def preparar_excel_prediccion(ruta, preprocesador):
     """Transforma un Excel nuevo con el estado ajustado durante Train."""
     variables = preprocesador['variables']
     estado = preprocesador['limpieza']
+    umbral_reinicio = preprocesador.get('umbral_reinicio')
     variables_con_auxiliares = columnas_para_transformar(estado, variables)
     registros = cargar_excel(ruta, columnas_de_origen(variables), columnas_de_origen(variables_con_auxiliares))
-    diario = preparar_cierres(registros, con_objetivo=False)
+    diario = preparar_cierres(registros, con_objetivo=False, umbral_reinicio=umbral_reinicio)
     usa_clima = any(col in COLUMNAS_CLIMA for col in variables_con_auxiliares)
     features = crear_features(diario, clima=None if usa_clima else pd.DataFrame(), con_objetivo=False)
     faltantes = sorted(set(variables) - set(features.columns))
@@ -490,6 +505,7 @@ def filtrar_imputar_y_dividir(df_diario: pd.DataFrame, *, guardar_estado=False):
     """Divide el dataset y ajusta la limpieza con Train completo."""
     print("[4/6] Filtrando, imputando y tratando outliers (Train 70%, Validation y Test 15%).")
     train, val, test = dividir_temporalmente(df_diario)
+    train.attrs['umbral_reinicio'] = df_diario.attrs.get('umbral_reinicio')
     X_train, estado = ajustar_limpieza(train)
     X_val = transformar_limpieza(val, estado)
     X_test = transformar_limpieza(test, estado)
@@ -580,6 +596,7 @@ def guardar_artefactos(
     joblib.dump({
         'dataset_sha256': checksum_val,
         'variables': list(features_finales),
+        'umbral_reinicio': estado.get('umbral_reinicio'),
         'limpieza': {
             'columnas': list(features_finales),
             'imputadores': [(grupo, imputador) for grupo, imputador in estado['imputadores']
@@ -608,7 +625,7 @@ def guardar_artefactos(
         "fecha_generacion": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "script_origen": "src/preprocessing_pipeline.py",
         "transformaciones_aplicadas": [
-            "Filtrado de días incompletos (<25 registros), excedidos (>25) y sin reinicio (>100 kW a las 00:00)",
+            "Filtrado de días incompletos (<25 registros), excedidos (>25) y sin reinicio a las 00:00 (umbral adaptativo: 20% de la mediana de cierre en Train)",
             "Agregación temporal de datos a nivel diario (cierre 23:59) con frecuencia continua ('D')",
             f"Cierres de Frío fuera de [{LIMITE_INFERIOR_FRIO:g}, {LIMITE_SUPERIOR_FRIO:g}] kW tratados como faltantes "
             f"(cuartiles del primer tramo de ajuste temporal de Train, con margen de {FACTOR_IQR_FRIO} IQR y piso en cero)",
