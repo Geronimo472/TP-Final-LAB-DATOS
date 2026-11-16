@@ -13,7 +13,7 @@ Para ejecutar el proyecto se necesita:
 - **Python 3.12**
 - **Conda** (Miniforge o Miniconda)
 - **uv** (gestor de dependencias)
-- **Git**
+- **Git** y **Git LFS** (para descargar los Excel originales)
 - VS Code con las extensiones Python y Jupyter (recomendado)
 
 En Windows, uv puede instalarse mediante:
@@ -27,6 +27,13 @@ Verificar la instalación:
 ```powershell
 conda --version
 uv --version
+git lfs version
+```
+
+Git LFS viene incluido en Git para Windows. En Linux o Mac se instala con el gestor de paquetes (`sudo apt install git-lfs` o `brew install git-lfs`). En cualquier sistema hay que activarlo una vez por usuario:
+
+```bash
+git lfs install
 ```
 
 ## 2. Clonar el repositorio
@@ -34,7 +41,10 @@ uv --version
 ```bash
 git clone https://github.com/Geronimo472/TP-Final-LAB-DATOS.git
 cd TP-Final-LAB-DATOS
+git lfs pull
 ```
+
+`git lfs pull` descarga los Excel originales en `data/raw/`. Si Git LFS no está activado, esos archivos quedan como punteros de texto de pocos bytes y el EDA y `predict.py` no los pueden leer.
 
 ## 3. Configuración del entorno virtual
 
@@ -66,7 +76,7 @@ Con el entorno activado, ejecutar desde la raíz del proyecto:
 uv pip install --python "$env:CONDA_PREFIX\python.exe" -r requirements.txt
 ```
 
-El archivo `requirements.txt` contiene las dependencias y versiones utilizadas por el proyecto.
+El archivo `requirements.txt` contiene las dependencias y versiones utilizadas por el proyecto, congeladas con `uv pip freeze`. `pywinpty` solo se instala en Windows (lleva el marcador `sys_platform == "win32"`), así que el mismo archivo funciona en Linux y Mac.
 
 Para comprobar la instalación:
 
@@ -87,7 +97,7 @@ Esto garantiza que los notebooks utilicen las mismas dependencias que los script
 
 ## 6. Datos del proyecto
 
-Los archivos Excel originales se gestionan mediante Git LFS. Después de clonar el repositorio, ejecutar `git lfs pull` para descargarlos en:
+Los archivos Excel originales los entrega la cátedra. En lugar de ignorarlos con `.gitignore`, los versionamos con Git LFS: así cualquier equipo que clone el repositorio obtiene exactamente los mismos archivos con `git lfs pull`, sin descargas manuales, y Git guarda solo un puntero liviano en el historial. Quedan en:
 
 ```text
 data/
@@ -105,26 +115,51 @@ Después del procesamiento se genera:
 data/processed/dataset_final.csv
 ```
 
-Este archivo contiene los datos preparados para entrenar los modelos.
+Este archivo contiene los datos preparados para entrenar los modelos. `data/processed/data_lineage.json` registra de qué archivos y con qué parámetros se generó.
+
+### Verificación con checksums
+
+`data/checksums.json` guarda el SHA-256 de `data/dataset_unificado_inicial.csv` y de `data/processed/dataset_final.csv`. Para comprobar que una ejecución reprodujo los mismos datos, comparar esos valores con:
+
+```powershell
+Get-FileHash data/processed/dataset_final.csv -Algorithm SHA256
+Get-FileHash data/dataset_unificado_inicial.csv -Algorithm SHA256
+```
+
+En Linux o Mac: `sha256sum data/processed/dataset_final.csv data/dataset_unificado_inicial.csv`. Los hashes se comparan sin distinguir mayúsculas y minúsculas. El registro del modelo (`models/model_registry.json`) guarda además el hash del `dataset_final.csv` con el que se entrenó cada versión.
 
 ## 7. Estructura del proyecto
 
 ```text
 TP-Final-LAB-DATOS/
 ├── data/
+│   ├── raw/                        # Excel originales (Git LFS)
+│   ├── checksums.json              # SHA-256 de los datos generados
 │   └── processed/
+│       ├── dataset_final.csv       # dataset sin escalar para modelar
+│       └── data_lineage.json       # origen y parámetros del dataset
 ├── notebooks/
-│   ├── eda.ipynb
-│   ├── preprocesamiento.ipynb
-│   └── optuna_optimization.ipynb
+│   ├── eda.ipynb                   # análisis exploratorio
+│   ├── preprocesamiento.ipynb      # limpieza, features y selección de variables
+│   ├── optuna_optimization.ipynb   # búsqueda de hiperparámetros
+│   └── modelado.ipynb              # comparación de modelos y baselines
 ├── src/
 │   ├── preprocessing_pipeline.py
 │   ├── train_model.py
 │   ├── evaluate_model.py
 │   └── predict.py
 ├── models/
+│   ├── modelo_v1.0.0.pkl           # modelo final con su preprocesamiento
+│   ├── model_registry.json         # registro de versiones
+│   └── best_params.json            # hiperparámetros de Optuna
 ├── results/
+│   ├── experiment_logs.csv
+│   ├── evaluacion_test_v1.0.0.json
+│   └── seleccion_variables/        # comparación SelectKBest, RFE y Lasso
+├── .gitattributes
 ├── .gitignore
+├── consigna.md
+├── preguntas_informe.md            # respuestas a las preguntas del informe
 ├── requirements.txt
 └── README.md
 ```
@@ -144,7 +179,7 @@ python src/preprocessing_pipeline.py
 
 El notebook `notebooks/preprocesamiento.ipynb` documenta y permite inspeccionar los mismos criterios de preparación.
 
-El pipeline limpia los datos, genera características, realiza la división temporal de los conjuntos y exporta `data/processed/dataset_final.csv`. La ruta de entrada habitual es `data/dataset_unificado_inicial.csv`. Puede indicarse otra con `--data RUTA`.
+El pipeline limpia los datos, genera características (rezagos y medias móviles), realiza la división temporal de los conjuntos, selecciona 10 variables con SelectKBest (ANOVA F) ajustado solo en Train y exporta `data/processed/dataset_final.csv`. La ruta de entrada habitual es `data/dataset_unificado_inicial.csv`. Puede indicarse otra con `--data RUTA`.
 
 El comando también genera `data/processed/preprocesador.joblib` con los imputadores, los límites de atípicos y las variables seleccionadas en Train. Para guardar un modelo apto para predecir desde Excel, generá el estado y el CSV juntos con el script.
 
@@ -228,6 +263,14 @@ Los datos originales quedan almacenados en Git LFS y se materializan en `data/ra
 
 ## 10. Estado del proyecto
 
-El proyecto se encuentra en desarrollo.
+Modelo final: **Ridge v1.0.0** (`alpha` ≈ 13,72), con 10 variables seleccionadas por SelectKBest (ANOVA F). Está registrado en `models/model_registry.json` y su commit lleva la etiqueta `v1.0.0`.
 
-Quedan pendientes la validación definitiva del preprocesamiento, la selección del modelo final y la comprobación completa de la reproducibilidad en otro equipo.
+Resultados en Test (165 días, del 27/04/2023 al 24/10/2023, `results/evaluacion_test_v1.0.0.json`):
+
+| Método | MAE (kW) | RMSE (kW) | R² |
+| --- | ---: | ---: | ---: |
+| Persistencia | 3.369 | 4.410 | 0,40 |
+| Media móvil 7 días | 3.033 | 3.889 | 0,54 |
+| **Ridge v1.0.0** | **2.773** | **3.651** | **0,59** |
+
+El modelo se eligió con Validation (MAE 2.265 kW). Test se usó una sola vez, para la evaluación final. Las decisiones y limitaciones se justifican en `preguntas_informe.md`.
