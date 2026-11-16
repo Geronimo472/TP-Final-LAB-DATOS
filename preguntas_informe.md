@@ -1,6 +1,4 @@
-# Las cinco preguntas del informe final
-
-Para cada respuesta, expliquen qué decidieron y respáldenlo con un número medido en el proyecto.
+# Conclusiones
 
 ## 1. ¿Su modelo agrega valor?
 
