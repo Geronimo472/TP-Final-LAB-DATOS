@@ -13,7 +13,7 @@ Para ejecutar el proyecto se necesita:
 - **Python 3.12**
 - **Conda** (Miniforge o Miniconda)
 - **uv** (gestor de dependencias)
-- **Git** y **Git LFS** (para descargar los Excel originales)
+- **Git**
 - VS Code con las extensiones Python y Jupyter (recomendado)
 
 En Windows, uv puede instalarse mediante:
@@ -27,13 +27,7 @@ Verificar la instalación:
 ```powershell
 conda --version
 uv --version
-git lfs version
-```
-
-Git LFS viene incluido en Git para Windows. En Linux o Mac se instala con el gestor de paquetes (`sudo apt install git-lfs` o `brew install git-lfs`). En cualquier sistema hay que activarlo una vez por usuario:
-
-```bash
-git lfs install
+git --version
 ```
 
 ## 2. Clonar el repositorio
@@ -41,10 +35,7 @@ git lfs install
 ```bash
 git clone https://github.com/Geronimo472/TP-Final-LAB-DATOS.git
 cd TP-Final-LAB-DATOS
-git lfs pull
 ```
-
-`git lfs pull` descarga los Excel originales en `data/raw/`. Si Git LFS no está activado, esos archivos quedan como punteros de texto de pocos bytes y el EDA y `predict.py` no los pueden leer.
 
 ## 3. Configuración del entorno virtual
 
@@ -97,7 +88,7 @@ Esto garantiza que los notebooks utilicen las mismas dependencias que los script
 
 ## 6. Datos del proyecto
 
-Los archivos Excel originales los entrega la cátedra. En lugar de ignorarlos con `.gitignore`, los versionamos con Git LFS: así cualquier equipo que clone el repositorio obtiene exactamente los mismos archivos con `git lfs pull`, sin descargas manuales, y Git guarda solo un puntero liviano en el historial. Quedan en:
+Conseguí los archivos Excel originales de la cátedra y copiá los tres archivos de trabajo en la carpeta local `data/raw/`. Creá esa carpeta si hace falta. Git la ignora.
 
 ```text
 data/
@@ -133,7 +124,7 @@ En Linux o Mac: `sha256sum data/processed/dataset_final.csv data/dataset_unifica
 ```text
 TP-Final-LAB-DATOS/
 ├── data/
-│   ├── raw/                        # Excel originales (Git LFS)
+│   ├── raw/                        # Excel originales, solo en local
 │   ├── checksums.json              # SHA-256 de los datos generados
 │   └── processed/
 │       ├── dataset_final.csv       # dataset sin escalar para modelar
@@ -257,9 +248,6 @@ El proyecto utiliza:
 - Semilla aleatoria `42` en los procedimientos que admiten `random_state`.
 - Separación temporal Train (70 %), Validation (15 %) y Test (15 %).
 - Git para el control de versiones.
-- Git LFS para versionar los Excel originales sin incorporarlos directamente al historial normal de Git.
-
-Los datos originales quedan almacenados en Git LFS y se materializan en `data/raw` al ejecutar `git lfs pull`.
 
 ## 10. Estado del proyecto
 

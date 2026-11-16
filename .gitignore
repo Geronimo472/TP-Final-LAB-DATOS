@@ -15,6 +15,9 @@ __pycache__/
 /notebooks/data/
 /notebooks/datos crudos/
 
+# Excel originales provistos por la cátedra
+/data/raw/
+
 # Ignorar datos procesados generados por código
 data/processed/*.csv
 data/processed/preprocesador.joblib
